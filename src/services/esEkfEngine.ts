@@ -106,6 +106,12 @@ export class ESEKFEngine {
     this.P = this.initCovariance();
   }
 
+  public setHeading(headingDeg: number) {
+    const rad = (headingDeg * Math.PI) / 180;
+    const half = rad * 0.5;
+    this.q = [Math.cos(half), 0, 0, Math.sin(half)];
+  }
+
   /**
    * Rotation matrix R(q) from Body frame to Navigation frame
    */

@@ -12,6 +12,7 @@ import type {
 } from '../types';
 import { computeRobustCompassHeading, normalizeDegrees } from '../utils/orientation';
 import { aiInertialEngine } from './aiInertialEngine';
+import { esEkfEngine } from './esEkfEngine';
 
 export interface GridTrackerState {
   currentX: number;
@@ -207,7 +208,16 @@ export class GridOdometryEngine {
       return;
     }
 
-    const thetaRad = (this.headingData.heading * Math.PI) / 180;
+    const thetaDeg =
+      aiInertialEngine.getModelMode() === 'TCN'
+        ? esEkfEngine.getState().headingDeg
+        : this.headingData.heading;
+
+    if (aiInertialEngine.getModelMode() === 'TCN') {
+      this.headingData.heading = Number(thetaDeg.toFixed(1));
+    }
+
+    const thetaRad = (thetaDeg * Math.PI) / 180;
     const dx = displacementMeters * Math.sin(thetaRad);
     const dy = displacementMeters * Math.cos(thetaRad);
 
@@ -247,6 +257,7 @@ export class GridOdometryEngine {
       rawHeading: norm,
       source: 'simulated',
     };
+    esEkfEngine.setHeading(norm);
     this.notify(true);
   }
 
