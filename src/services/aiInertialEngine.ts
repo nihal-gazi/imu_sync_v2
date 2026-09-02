@@ -102,9 +102,13 @@ export class AIInertialEngine {
   public setModelMode(mode: ModelMode) {
     this.activeMode = mode;
     this.metrics.activeMode = mode;
-    this.metrics.modelName = mode === 'SIH-Rect'
-      ? 'SIH-Rect (Transformer Residual Drift Corrected)'
-      : 'SIH MLP (Monolithic Base)';
+    if (mode === 'SIH-Rect-scaled') {
+      this.metrics.modelName = 'SIH-Rect-scaled (40x Scaled + Elevated Rest Gate)';
+    } else if (mode === 'SIH-Rect') {
+      this.metrics.modelName = 'SIH-Rect (Transformer Residual Drift Corrected)';
+    } else {
+      this.metrics.modelName = 'SIH MLP (Monolithic Base)';
+    }
     console.log(`[AI Engine] Active Model switched to: ${mode}`);
     this.notify();
   }
@@ -282,7 +286,13 @@ export class AIInertialEngine {
       const accelVariance = Math.max(0, (sumSqNorm / n) - (meanNorm * meanNorm));
       const avgGyroDeg = sumGyro / n;
 
-      const isStationary = accelVariance < 0.05 && avgGyroDeg < 1.8;
+      // Elevated Rest Detection (less hyper-sensitive to micro-tremors and ambient vibrations)
+      // SIH-Rect-scaled uses elevated threshold: 0.22 accel variance and 4.5 deg/s gyro
+      // SIH / SIH-Rect uses 0.12 accel variance and 3.0 deg/s gyro (raised from 0.05 / 1.8)
+      const restAccelThresh = (this.activeMode === 'SIH-Rect-scaled') ? 0.22 : 0.12;
+      const restGyroThresh = (this.activeMode === 'SIH-Rect-scaled') ? 4.5 : 3.0;
+
+      const isStationary = accelVariance < restAccelThresh && avgGyroDeg < restGyroThresh;
       this.metrics.isStationary = isStationary;
       this.metrics.motionVariance = Number(accelVariance.toFixed(4));
 
@@ -336,11 +346,12 @@ export class AIInertialEngine {
         sihResults[key]?.dispose?.();
       }
 
-      // Step 3: Run SIH-Rect Transformer Residual Correction if mode is active
+      // Step 3: Run Transformer Residual Correction if active
       let deltaResidualDisp = 0;
       let deltaResidualSpeed = 0;
+      const isRectMode = this.activeMode === 'SIH-Rect' || this.activeMode === 'SIH-Rect-scaled';
 
-      if (this.activeMode === 'SIH-Rect' && this.sessionTransformer && this.rawImuBuffer60.length >= this.seqLenTrans) {
+      if (isRectMode && this.sessionTransformer && this.rawImuBuffer60.length >= this.seqLenTrans) {
         // Normalize 60-sample window
         const mean = this.scaler.mean;
         const std = this.scaler.std;
@@ -375,6 +386,17 @@ export class AIInertialEngine {
         // Apply Dynamic Rectification
         magnitude = Math.max(0.0, magnitude + deltaResidualDisp);
         instSpeedMps = Math.max(0.0, instSpeedMps + deltaResidualSpeed);
+      }
+
+      // Step 4: Scale down velocity by 40x for SIH-Rect-scaled
+      if (this.activeMode === 'SIH-Rect-scaled') {
+        const scaleFactor = 1.0 / 40.0;
+        magnitude *= scaleFactor;
+        instSpeedMps *= scaleFactor;
+        dx *= scaleFactor;
+        dy *= scaleFactor;
+        deltaResidualDisp *= scaleFactor;
+        deltaResidualSpeed *= scaleFactor;
       }
 
       const latency = performance.now() - t0;

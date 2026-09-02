@@ -7,7 +7,7 @@ import { gridEngine } from './services/gridOdometryEngine';
 import { aiInertialEngine } from './services/aiInertialEngine';
 import type { GridTrackerState } from './services/gridOdometryEngine';
 import type { AIInferenceMetrics, SensorStatus, ModelMode } from './types';
-import { Grid, Activity, Sparkles } from 'lucide-react';
+import { Grid, Activity, Sparkles, Gauge } from 'lucide-react';
 
 export const App: React.FC = () => {
   const [gridState, setGridState] = useState<GridTrackerState>(() => gridEngine.getState());
@@ -253,10 +253,13 @@ export const App: React.FC = () => {
             <div className="text-sm font-bold text-white flex items-center gap-2">
               <span>IMU GRID TRACKER</span>
               <span className={`text-[10px] px-2 py-0.5 rounded border font-bold flex items-center gap-1 ${
-                modelMode === 'SIH-Rect'
+                modelMode === 'SIH-Rect-scaled'
+                  ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+                  : modelMode === 'SIH-Rect'
                   ? 'bg-indigo-500/20 text-indigo-300 border-indigo-500/40'
                   : 'bg-cyan-500/20 text-cyan-300 border-cyan-500/40'
               }`}>
+                {modelMode === 'SIH-Rect-scaled' && <Gauge className="w-2.5 h-2.5" />}
                 {modelMode === 'SIH-Rect' && <Sparkles className="w-2.5 h-2.5" />}
                 <span>{modelMode}</span>
               </span>
@@ -269,7 +272,9 @@ export const App: React.FC = () => {
               </span>
             </div>
             <div className="text-[11px] text-slate-400">
-              {modelMode === 'SIH-Rect'
+              {modelMode === 'SIH-Rect-scaled'
+                ? 'SIH-Rectified (40x Scaled Velocity & High-Threshold Anti-Drift Rest Gate)'
+                : modelMode === 'SIH-Rect'
                 ? 'SIH Multi-Head MLP + Transformer 1.0s Residual Drift Rectification'
                 : 'Pure 2D Cartesian Dead-Reckoning &bull; Gaussian Filter &bull; ZUPT Gate'}
             </div>

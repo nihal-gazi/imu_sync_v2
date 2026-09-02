@@ -10,6 +10,7 @@ import {
   ShieldCheck,
   Cpu,
   Sparkles,
+  Gauge,
 } from 'lucide-react';
 import type { ModelMode } from '../types';
 
@@ -51,10 +52,10 @@ export const ControlBar: React.FC<ControlBarProps> = ({
           <Cpu className="w-3.5 h-3.5 text-cyan-400" />
           <span className="text-[11px]">AI ENGINE:</span>
         </div>
-        <div className="flex items-center gap-1.5">
+        <div className="flex items-center gap-1">
           <button
             onClick={() => onSelectModelMode('SIH')}
-            className={`px-3 py-1 rounded-md text-xs font-bold transition-all flex items-center gap-1 ${
+            className={`px-2 py-1 rounded-md text-xs font-bold transition-all flex items-center gap-1 ${
               activeModelMode === 'SIH'
                 ? 'bg-cyan-500 text-slate-950 shadow-md shadow-cyan-500/30'
                 : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
@@ -65,7 +66,7 @@ export const ControlBar: React.FC<ControlBarProps> = ({
           </button>
           <button
             onClick={() => onSelectModelMode('SIH-Rect')}
-            className={`px-3 py-1 rounded-md text-xs font-bold transition-all flex items-center gap-1 ${
+            className={`px-2 py-1 rounded-md text-xs font-bold transition-all flex items-center gap-1 ${
               activeModelMode === 'SIH-Rect'
                 ? 'bg-indigo-500 text-white shadow-md shadow-indigo-500/30'
                 : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
@@ -74,6 +75,18 @@ export const ControlBar: React.FC<ControlBarProps> = ({
           >
             <Sparkles className="w-3 h-3" />
             <span>SIH-Rect</span>
+          </button>
+          <button
+            onClick={() => onSelectModelMode('SIH-Rect-scaled')}
+            className={`px-2 py-1 rounded-md text-xs font-bold transition-all flex items-center gap-1 ${
+              activeModelMode === 'SIH-Rect-scaled'
+                ? 'bg-emerald-500 text-slate-950 shadow-md shadow-emerald-500/30'
+                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
+            }`}
+            title="SIH-Rect-scaled: 40x Scaled Velocity + High-Threshold ZUPT Rest Gate"
+          >
+            <Gauge className="w-3 h-3" />
+            <span>SIH-Rect-scaled</span>
           </button>
         </div>
       </div>
