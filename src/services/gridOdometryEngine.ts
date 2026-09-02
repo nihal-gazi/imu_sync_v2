@@ -1,6 +1,7 @@
 /**
  * Pure 2D Cartesian Grid Odometry Engine.
  * Accumulates dead-reckoning displacement [X, Y] in meters on an infinite 2D grid.
+ * Throttled state notifications prevent React re-render thrashing at 60-100Hz.
  */
 
 import type {
@@ -48,14 +49,15 @@ export class GridOdometryEngine {
   };
 
   private recentMotion: MotionSample[] = [];
-  private readonly maxMotionSamples = 80;
+  private readonly maxMotionSamples = 60;
   private pathHistory: GridPoint[] = [];
   private readonly maxPathPoints = 1200;
 
   private listeners: Set<GridTrackerListener> = new Set();
+  private lastNotifyTime: number = 0;
+  private readonly notifyThrottleMs: number = 80; // ~12.5Hz max for React text updates
 
   constructor() {
-    // Initial start point at origin
     this.pathHistory.push({
       x: 0,
       y: 0,
@@ -74,7 +76,12 @@ export class GridOdometryEngine {
     };
   }
 
-  private notify() {
+  private notify(force: boolean = false) {
+    const now = performance.now();
+    if (!force && now - this.lastNotifyTime < this.notifyThrottleMs) {
+      return;
+    }
+    this.lastNotifyTime = now;
     const state = this.getState();
     this.listeners.forEach((listener) => listener(state));
   }
@@ -85,9 +92,26 @@ export class GridOdometryEngine {
       currentY: this.currentY,
       headingData: { ...this.headingData },
       navigationMetrics: { ...this.navigationMetrics },
-      recentMotion: [...this.recentMotion],
-      pathHistory: [...this.pathHistory],
+      recentMotion: this.recentMotion,
+      pathHistory: this.pathHistory,
     };
+  }
+
+  // Direct zero-copy getters for 60fps canvas render loops
+  public getRecentMotion(): readonly MotionSample[] {
+    return this.recentMotion;
+  }
+
+  public getPathHistory(): readonly GridPoint[] {
+    return this.pathHistory;
+  }
+
+  public getCurrentPosition(): { x: number; y: number } {
+    return { x: this.currentX, y: this.currentY };
+  }
+
+  public getHeading(): number {
+    return this.headingData.heading;
   }
 
   public updateOrientation(
@@ -120,7 +144,7 @@ export class GridOdometryEngine {
       calibrated: true,
     };
 
-    this.notify();
+    this.notify(false);
   }
 
   public processDeviceMotion(
@@ -171,7 +195,7 @@ export class GridOdometryEngine {
       this.recentMotion.shift();
     }
 
-    this.notify();
+    this.notify(false);
   }
 
   private handleOdometryStep(displacementMeters: number, speedMps: number, timestamp: number) {
@@ -179,11 +203,10 @@ export class GridOdometryEngine {
       this.navigationMetrics.currentSpeedMps = 0;
       this.navigationMetrics.currentSpeedKmh = 0;
       this.navigationMetrics.lastDisplacementMeters = 0;
-      this.notify();
+      this.notify(true);
       return;
     }
 
-    // Project displacement along current heading angle (0 deg = North/+Y, 90 deg = East/+X)
     const thetaRad = (this.headingData.heading * Math.PI) / 180;
     const dx = displacementMeters * Math.sin(thetaRad);
     const dy = displacementMeters * Math.cos(thetaRad);
@@ -213,7 +236,7 @@ export class GridOdometryEngine {
       this.pathHistory.shift();
     }
 
-    this.notify();
+    this.notify(true);
   }
 
   public setManualHeading(heading: number) {
@@ -224,7 +247,7 @@ export class GridOdometryEngine {
       rawHeading: norm,
       source: 'simulated',
     };
-    this.notify();
+    this.notify(true);
   }
 
   public resetGrid() {
@@ -251,7 +274,7 @@ export class GridOdometryEngine {
       },
     ];
     aiInertialEngine.reset();
-    this.notify();
+    this.notify(true);
   }
 }
 

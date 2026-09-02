@@ -25,9 +25,11 @@ export const App: React.FC = () => {
   const simIntervalRef = useRef<number | null>(null);
   const simPhaseRef = useRef<number>(0);
   const motionCountRef = useRef<number>(0);
+  const hasHardwareMotionRef = useRef<boolean>(false);
+  const lastStatusUpdateRef = useRef<number>(0);
   const hasAbsoluteOrientationRef = useRef<boolean>(false);
 
-  // Subscribe to Engine State
+  // Subscribe to Engine State updates (throttled by gridEngine)
   useEffect(() => {
     const unsubGrid = gridEngine.subscribe((state) => {
       setGridState(state);
@@ -37,10 +39,13 @@ export const App: React.FC = () => {
       setAiMetrics(metrics);
     });
 
-    // Auto-load ONNX Model via WebGPU / WASM
-    aiInertialEngine.initializeModel('/models/inertial_mlp.onnx');
+    // Defer model loading slightly to ensure fluid initial mobile mount
+    const timer = setTimeout(() => {
+      aiInertialEngine.initializeModel('/models/inertial_mlp.onnx');
+    }, 100);
 
     return () => {
+      clearTimeout(timer);
       unsubGrid();
       unsubAi();
     };
@@ -89,6 +94,7 @@ export const App: React.FC = () => {
   }, []);
 
   // Mobile Hardware Sensor Event Listeners
+  // Optimized: does NOT call setState on every 60-100Hz packet
   useEffect(() => {
     const handleDeviceMotion = (event: DeviceMotionEvent) => {
       let ax = 0;
@@ -112,7 +118,7 @@ export const App: React.FC = () => {
       ) {
         ax = event.acceleration.x;
         ay = event.acceleration.y;
-        az = event.acceleration.z + 9.81; // synthesize 1G vertical gravity
+        az = event.acceleration.z + 9.81;
       } else {
         return;
       }
@@ -124,36 +130,40 @@ export const App: React.FC = () => {
       const gy = rot?.gamma ?? 0;
       const gz = rot?.alpha ?? 0;
 
-      const hasGyro = rot !== null && (rot.alpha !== null || rot.beta !== null || rot.gamma !== null);
+      // Throttle sensor status updates to max 2Hz to completely stop React re-render thrashing
+      const now = performance.now();
+      if (!hasHardwareMotionRef.current || now - lastStatusUpdateRef.current > 500) {
+        lastStatusUpdateRef.current = now;
+        hasHardwareMotionRef.current = true;
+        const hasGyro = rot !== null && (rot.alpha !== null || rot.beta !== null || rot.gamma !== null);
 
-      setSensorStatus((prev) => ({
-        ...prev,
-        accelAvailable: true,
-        gyroAvailable: hasGyro || prev.gyroAvailable,
-        hasHardwareMotion: true,
-        motionEventCount: motionCountRef.current,
-      }));
+        setSensorStatus((prev) => ({
+          ...prev,
+          accelAvailable: true,
+          gyroAvailable: hasGyro || prev.gyroAvailable,
+          hasHardwareMotion: true,
+          motionEventCount: motionCountRef.current,
+        }));
+      }
 
+      // Forward directly to high-performance engine buffer
       gridEngine.processDeviceMotion(ax, ay, az, gx, gy, gz, Date.now());
     };
 
     const handleAbsoluteOrientation = (event: DeviceOrientationEvent) => {
       if (event.alpha === null) return;
       hasAbsoluteOrientationRef.current = true;
-      setSensorStatus((prev) => ({ ...prev, gyroAvailable: true }));
       gridEngine.updateOrientation(event.alpha, event.beta, event.gamma, undefined, true);
     };
 
     const handleStandardOrientation = (event: DeviceOrientationEvent) => {
       const webkitHeading = (event as unknown as { webkitCompassHeading?: number }).webkitCompassHeading;
       if (webkitHeading !== undefined && !isNaN(webkitHeading)) {
-        setSensorStatus((prev) => ({ ...prev, gyroAvailable: true }));
         gridEngine.updateOrientation(event.alpha, event.beta, event.gamma, webkitHeading, true);
         return;
       }
 
       if (!hasAbsoluteOrientationRef.current && event.alpha !== null) {
-        setSensorStatus((prev) => ({ ...prev, gyroAvailable: true }));
         gridEngine.updateOrientation(event.alpha, event.beta, event.gamma, undefined, false);
       }
     };
@@ -206,7 +216,6 @@ export const App: React.FC = () => {
         simPhaseRef.current += 0.25;
         const phase = simPhaseRef.current;
 
-        // Realistic walking kinematics waveform: 1.8 Hz cadence
         const cadence = Math.sin(phase * 2.8);
         const lateral = Math.cos(phase * 1.4);
 
@@ -219,7 +228,7 @@ export const App: React.FC = () => {
         const gz = lateral * 4.0;
 
         gridEngine.processDeviceMotion(ax, ay, az, gx, gy, gz, Date.now());
-      }, 50); // 20Hz sensor stream
+      }, 50);
     }
   }, []);
 
@@ -267,8 +276,6 @@ export const App: React.FC = () => {
           <GridCanvas
             currentX={gridState.currentX}
             currentY={gridState.currentY}
-            heading={gridState.headingData.heading}
-            path={gridState.pathHistory}
             isStationary={aiMetrics.isStationary}
             onReset={() => gridEngine.resetGrid()}
           />
@@ -283,7 +290,6 @@ export const App: React.FC = () => {
           />
 
           <SensorGraphs
-            recentMotion={gridState.recentMotion}
             pitch={gridState.headingData.pitch}
             roll={gridState.headingData.roll}
             heading={gridState.headingData.heading}

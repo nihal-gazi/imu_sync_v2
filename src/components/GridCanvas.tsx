@@ -1,12 +1,10 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
-import type { GridPoint } from '../types';
 import { Crosshair, Plus, Minus, RotateCcw } from 'lucide-react';
+import { gridEngine } from '../services/gridOdometryEngine';
 
 interface GridCanvasProps {
   currentX: number;
   currentY: number;
-  heading: number;
-  path: GridPoint[];
   isStationary: boolean;
   onReset: () => void;
 }
@@ -14,219 +12,223 @@ interface GridCanvasProps {
 export const GridCanvas: React.FC<GridCanvasProps> = ({
   currentX,
   currentY,
-  heading,
-  path,
   isStationary,
   onReset,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
-  // Viewport transform: pixels per meter & center offset
   const [scale, setScale] = useState<number>(25); // 25 px = 1 meter
-  const [offset, setOffset] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
   const [autoFollow, setAutoFollow] = useState<boolean>(true);
+  const autoFollowRef = useRef<boolean>(true);
+  autoFollowRef.current = autoFollow;
 
+  const isStationaryRef = useRef<boolean>(isStationary);
+  isStationaryRef.current = isStationary;
+
+  const scaleRef = useRef<number>(25);
+  scaleRef.current = scale;
+
+  const offsetRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
   const isDraggingRef = useRef<boolean>(false);
   const dragStartRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
-  const offsetRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
-  const scaleRef = useRef<number>(25);
 
-  scaleRef.current = scale;
-  offsetRef.current = offset;
-
-  // Auto-follow current position
+  // 60FPS Dedicated Grid Render Loop via requestAnimationFrame
   useEffect(() => {
-    if (autoFollow) {
-      setOffset({
-        x: -currentX * scale,
-        y: currentY * scale, // In canvas, +Y is down, so +North (+Y meters) is -Y in pixels
-      });
-    }
-  }, [currentX, currentY, scale, autoFollow]);
+    let animId: number;
 
-  // Main Render Loop
-  const renderGrid = useCallback(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
+    const render = () => {
+      const canvas = canvasRef.current;
+      if (!canvas) {
+        animId = requestAnimationFrame(render);
+        return;
+      }
+      const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        animId = requestAnimationFrame(render);
+        return;
+      }
 
-    const width = canvas.width;
-    const height = canvas.height;
-    const dpr = window.devicePixelRatio || 1;
+      const pos = gridEngine.getCurrentPosition();
+      const heading = gridEngine.getHeading();
+      const path = gridEngine.getPathHistory();
+      const curScale = scaleRef.current;
 
-    // Clear background
-    ctx.fillStyle = '#030712';
-    ctx.fillRect(0, 0, width, height);
-
-    const centerX = width / 2 + offset.x;
-    const centerY = height / 2 + offset.y;
-
-    // Grid spacing logic in meters based on zoom scale
-    let meterStep = 1;
-    if (scale < 10) meterStep = 10;
-    else if (scale < 20) meterStep = 5;
-    else if (scale < 40) meterStep = 2;
-    else meterStep = 1;
-
-    const pxStep = meterStep * scale;
-
-    // Minor Grid Lines
-    ctx.strokeStyle = '#0f172a';
-    ctx.lineWidth = 1;
-
-    const startX = centerX % pxStep;
-    for (let x = startX; x < width; x += pxStep) {
-      ctx.beginPath();
-      ctx.moveTo(x, 0);
-      ctx.lineTo(x, height);
-      ctx.stroke();
-    }
-
-    const startY = centerY % pxStep;
-    for (let y = startY; y < height; y += pxStep) {
-      ctx.beginPath();
-      ctx.moveTo(0, y);
-      ctx.lineTo(width, y);
-      ctx.stroke();
-    }
-
-    // Major Axes (X and Y passing through origin (0, 0))
-    ctx.strokeStyle = '#1e293b';
-    ctx.lineWidth = 2;
-
-    // Y-Axis (North-South line)
-    ctx.beginPath();
-    ctx.moveTo(centerX, 0);
-    ctx.lineTo(centerX, height);
-    ctx.stroke();
-
-    // X-Axis (East-West line)
-    ctx.beginPath();
-    ctx.moveTo(0, centerY);
-    ctx.lineTo(width, centerY);
-    ctx.stroke();
-
-    // Axis Labels & Coordinate Ticks
-    ctx.fillStyle = '#475569';
-    ctx.font = `${Math.round(10 * dpr)}px monospace`;
-
-    // Draw meter numbers along axes
-    const visibleRangeX = Math.ceil(width / (2 * pxStep)) + 2;
-    for (let i = -visibleRangeX; i <= visibleRangeX; i++) {
-      if (i === 0) continue;
-      const x = centerX + i * pxStep;
-      const meterVal = i * meterStep;
-      ctx.fillText(`${meterVal > 0 ? '+' : ''}${meterVal}m`, x - 12, centerY + 14);
-    }
-
-    const visibleRangeY = Math.ceil(height / (2 * pxStep)) + 2;
-    for (let i = -visibleRangeY; i <= visibleRangeY; i++) {
-      if (i === 0) continue;
-      const y = centerY - i * pxStep;
-      const meterVal = i * meterStep;
-      ctx.fillText(`${meterVal > 0 ? '+' : ''}${meterVal}m`, centerX + 6, y + 4);
-    }
-
-    // Origin Marker (0, 0)
-    ctx.fillStyle = '#64748b';
-    ctx.beginPath();
-    ctx.arc(centerX, centerY, 4, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillText('(0, 0)', centerX + 8, centerY - 8);
-
-    // Continuous Trajectory Path Trail
-    if (path.length > 1) {
-      ctx.beginPath();
-      ctx.strokeStyle = '#6366f1';
-      ctx.lineWidth = 3;
-      ctx.lineCap = 'round';
-      ctx.lineJoin = 'round';
-
-      path.forEach((pt, idx) => {
-        const px = centerX + pt.x * scale;
-        const py = centerY - pt.y * scale;
-        if (idx === 0) {
-          ctx.moveTo(px, py);
-        } else {
-          ctx.lineTo(px, py);
-        }
-      });
-      ctx.stroke();
-
-      // Draw subtle glow
-      ctx.strokeStyle = 'rgba(99, 102, 241, 0.25)';
-      ctx.lineWidth = 8;
-      ctx.stroke();
-    }
-
-    // Current Position Cursor & Heading Arrow
-    const curPx = centerX + currentX * scale;
-    const curPy = centerY - currentY * scale;
-
-    // Heading cone / pointer
-    const headingRad = (heading * Math.PI) / 180;
-    const pointerLen = 22;
-    const tipX = curPx + Math.sin(headingRad) * pointerLen;
-    const tipY = curPy - Math.cos(headingRad) * pointerLen;
-
-    const wingAngle1 = headingRad + (145 * Math.PI) / 180;
-    const wingAngle2 = headingRad - (145 * Math.PI) / 180;
-    const wingLen = 14;
-
-    const wing1X = curPx + Math.sin(wingAngle1) * wingLen;
-    const wing1Y = curPy - Math.cos(wingAngle1) * wingLen;
-    const wing2X = curPx + Math.sin(wingAngle2) * wingLen;
-    const wing2Y = curPy - Math.cos(wingAngle2) * wingLen;
-
-    // Heading Arrow polygon
-    ctx.fillStyle = isStationary ? '#38bdf8' : '#818cf8';
-    ctx.beginPath();
-    ctx.moveTo(tipX, tipY);
-    ctx.lineTo(wing1X, wing1Y);
-    ctx.lineTo(curPx, curPy);
-    ctx.lineTo(wing2X, wing2Y);
-    ctx.closePath();
-    ctx.fill();
-
-    // Pulse Ring around current position
-    ctx.strokeStyle = isStationary ? 'rgba(56, 189, 248, 0.4)' : 'rgba(129, 140, 248, 0.4)';
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.arc(curPx, curPy, 10, 0, Math.PI * 2);
-    ctx.stroke();
-
-    // Center dot
-    ctx.fillStyle = '#ffffff';
-    ctx.beginPath();
-    ctx.arc(curPx, curPy, 3, 0, Math.PI * 2);
-    ctx.fill();
-  }, [currentX, currentY, heading, path, isStationary, offset, scale]);
-
-  // Handle Canvas Resize
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-
-    const resize = () => {
-      const parent = canvas.parentElement;
-      if (!parent) return;
+      const width = canvas.width;
+      const height = canvas.height;
       const dpr = window.devicePixelRatio || 1;
-      canvas.width = parent.clientWidth * dpr;
-      canvas.height = parent.clientHeight * dpr;
-      renderGrid();
+
+      // Update auto-follow offset smoothly
+      if (autoFollowRef.current) {
+        const targetX = -pos.x * curScale;
+        const targetY = pos.y * curScale;
+        offsetRef.current.x += (targetX - offsetRef.current.x) * 0.15;
+        offsetRef.current.y += (targetY - offsetRef.current.y) * 0.15;
+      }
+
+      const centerX = width / 2 + offsetRef.current.x;
+      const centerY = height / 2 + offsetRef.current.y;
+
+      // Clear background
+      ctx.fillStyle = '#030712';
+      ctx.fillRect(0, 0, width, height);
+
+      // Grid spacing logic
+      let meterStep = 1;
+      if (curScale < 10) meterStep = 10;
+      else if (curScale < 20) meterStep = 5;
+      else if (curScale < 40) meterStep = 2;
+      else meterStep = 1;
+
+      const pxStep = meterStep * curScale;
+
+      // Minor Grid Lines
+      ctx.strokeStyle = '#0f172a';
+      ctx.lineWidth = 1;
+
+      const startX = centerX % pxStep;
+      for (let x = startX; x < width; x += pxStep) {
+        ctx.beginPath();
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x, height);
+        ctx.stroke();
+      }
+
+      const startY = centerY % pxStep;
+      for (let y = startY; y < height; y += pxStep) {
+        ctx.beginPath();
+        ctx.moveTo(0, y);
+        ctx.lineTo(width, y);
+        ctx.stroke();
+      }
+
+      // Major Axes (X and Y passing through origin (0, 0))
+      ctx.strokeStyle = '#1e293b';
+      ctx.lineWidth = 2;
+
+      // Y-Axis
+      ctx.beginPath();
+      ctx.moveTo(centerX, 0);
+      ctx.lineTo(centerX, height);
+      ctx.stroke();
+
+      // X-Axis
+      ctx.beginPath();
+      ctx.moveTo(0, centerY);
+      ctx.lineTo(width, centerY);
+      ctx.stroke();
+
+      // Axis Labels
+      ctx.fillStyle = '#475569';
+      ctx.font = `${Math.round(10 * dpr)}px monospace`;
+
+      const visibleRangeX = Math.ceil(width / (2 * pxStep)) + 2;
+      for (let i = -visibleRangeX; i <= visibleRangeX; i++) {
+        if (i === 0) continue;
+        const x = centerX + i * pxStep;
+        const meterVal = i * meterStep;
+        ctx.fillText(`${meterVal > 0 ? '+' : ''}${meterVal}m`, x - 12, centerY + 14);
+      }
+
+      const visibleRangeY = Math.ceil(height / (2 * pxStep)) + 2;
+      for (let i = -visibleRangeY; i <= visibleRangeY; i++) {
+        if (i === 0) continue;
+        const y = centerY - i * pxStep;
+        const meterVal = i * meterStep;
+        ctx.fillText(`${meterVal > 0 ? '+' : ''}${meterVal}m`, centerX + 6, y + 4);
+      }
+
+      // Origin Marker (0, 0)
+      ctx.fillStyle = '#64748b';
+      ctx.beginPath();
+      ctx.arc(centerX, centerY, 4, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillText('(0, 0)', centerX + 8, centerY - 8);
+
+      // Trajectory Path Trail (single continuous stroke)
+      const pathLen = path.length;
+      if (pathLen > 1) {
+        ctx.beginPath();
+        ctx.strokeStyle = '#6366f1';
+        ctx.lineWidth = 3;
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+
+        for (let i = 0; i < pathLen; i++) {
+          const pt = path[i];
+          const px = centerX + pt.x * curScale;
+          const py = centerY - pt.y * curScale;
+          if (i === 0) ctx.moveTo(px, py);
+          else ctx.lineTo(px, py);
+        }
+        ctx.stroke();
+      }
+
+      // Current Position Cursor
+      const curPx = centerX + pos.x * curScale;
+      const curPy = centerY - pos.y * curScale;
+
+      // Heading Pointer Arrow
+      const headingRad = (heading * Math.PI) / 180;
+      const pointerLen = 20;
+      const tipX = curPx + Math.sin(headingRad) * pointerLen;
+      const tipY = curPy - Math.cos(headingRad) * pointerLen;
+
+      const wingAngle1 = headingRad + (145 * Math.PI) / 180;
+      const wingAngle2 = headingRad - (145 * Math.PI) / 180;
+      const wingLen = 13;
+
+      const wing1X = curPx + Math.sin(wingAngle1) * wingLen;
+      const wing1Y = curPy - Math.cos(wingAngle1) * wingLen;
+      const wing2X = curPx + Math.sin(wingAngle2) * wingLen;
+      const wing2Y = curPy - Math.cos(wingAngle2) * wingLen;
+
+      ctx.fillStyle = isStationaryRef.current ? '#38bdf8' : '#818cf8';
+      ctx.beginPath();
+      ctx.moveTo(tipX, tipY);
+      ctx.lineTo(wing1X, wing1Y);
+      ctx.lineTo(curPx, curPy);
+      ctx.lineTo(wing2X, wing2Y);
+      ctx.closePath();
+      ctx.fill();
+
+      // Pulse Ring
+      ctx.strokeStyle = isStationaryRef.current ? 'rgba(56, 189, 248, 0.4)' : 'rgba(129, 140, 248, 0.4)';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(curPx, curPy, 9, 0, Math.PI * 2);
+      ctx.stroke();
+
+      // Center dot
+      ctx.fillStyle = '#ffffff';
+      ctx.beginPath();
+      ctx.arc(curPx, curPy, 3, 0, Math.PI * 2);
+      ctx.fill();
+
+      animId = requestAnimationFrame(render);
     };
 
-    resize();
-    window.addEventListener('resize', resize);
-    return () => window.removeEventListener('resize', resize);
-  }, [renderGrid]);
+    animId = requestAnimationFrame(render);
+    return () => cancelAnimationFrame(animId);
+  }, []);
+
+  // Handle Resize
+  const handleResize = useCallback(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const parent = canvas.parentElement;
+    if (!parent) return;
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = parent.clientWidth * dpr;
+    canvas.height = parent.clientHeight * dpr;
+  }, []);
 
   useEffect(() => {
-    renderGrid();
-  }, [renderGrid]);
+    handleResize();
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, [handleResize]);
 
-  // Mouse / Touch Pan & Zoom Handlers
+  // Mouse / Touch Handlers
   const handleMouseDown = (e: React.MouseEvent) => {
     isDraggingRef.current = true;
     dragStartRef.current = { x: e.clientX, y: e.clientY };
@@ -239,10 +241,8 @@ export const GridCanvas: React.FC<GridCanvasProps> = ({
     const dy = e.clientY - dragStartRef.current.y;
     dragStartRef.current = { x: e.clientX, y: e.clientY };
 
-    setOffset((prev) => ({
-      x: prev.x + dx,
-      y: prev.y + dy,
-    }));
+    offsetRef.current.x += dx;
+    offsetRef.current.y += dy;
   };
 
   const handleMouseUp = () => {
@@ -257,10 +257,9 @@ export const GridCanvas: React.FC<GridCanvasProps> = ({
 
   const handleCenter = () => {
     setAutoFollow(true);
-    setOffset({
-      x: -currentX * scale,
-      y: currentY * scale,
-    });
+    const pos = gridEngine.getCurrentPosition();
+    offsetRef.current.x = -pos.x * scaleRef.current;
+    offsetRef.current.y = pos.y * scaleRef.current;
   };
 
   return (
@@ -288,8 +287,6 @@ export const GridCanvas: React.FC<GridCanvasProps> = ({
         <div className="flex items-center gap-2 text-[10px] text-slate-500 pt-1 border-t border-slate-800">
           <span>SCALE:</span>
           <span>{scale.toFixed(0)} px/m</span>
-          <span>|</span>
-          <span>PTS: {path.length}</span>
         </div>
       </div>
 
