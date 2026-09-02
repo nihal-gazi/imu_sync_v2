@@ -89,9 +89,9 @@ export const TelemetryBar: React.FC<TelemetryBarProps> = ({
         </div>
         <div className="text-[10px] text-slate-500 truncate flex items-center justify-between">
           <span>Var: <strong className="text-slate-300">{aiMetrics.motionVariance.toFixed(3)}</strong> / {aiMetrics.restThreshold.toFixed(2)}</span>
-          {aiMetrics.activeMode === 'TCN' ? (
-            <span className="text-fuchsia-400 font-semibold">
-              TCN: {aiMetrics.tcnForwardSpeedMps.toFixed(1)}m/s (Z:{(aiMetrics.tcnZuptProbability * 100).toFixed(0)}%)
+          {aiMetrics.activeMode === 'STEP' ? (
+            <span className={`font-semibold ${aiMetrics.isPocketZupt ? 'text-sky-400' : 'text-amber-400'}`}>
+              {aiMetrics.isPocketZupt ? 'POCKET ZUPT (FROZEN)' : `Steps: ${aiMetrics.stepCount} (0.65m)`}
             </span>
           ) : aiMetrics.activeMode === 'SIH-Rect' ? (
             <span className="text-indigo-400 font-semibold">

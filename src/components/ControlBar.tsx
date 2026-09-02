@@ -11,6 +11,7 @@ import {
   Cpu,
   Sparkles,
   Gauge,
+  Footprints,
   SlidersHorizontal,
   Layers,
 } from 'lucide-react';
@@ -99,16 +100,16 @@ export const ControlBar: React.FC<ControlBarProps> = ({
             <span>SIH-Rect-scaled</span>
           </button>
           <button
-            onClick={() => onSelectModelMode('TCN')}
+            onClick={() => onSelectModelMode('STEP')}
             className={`px-2 py-1 rounded-md text-xs font-bold transition-all flex items-center gap-1 ${
-              activeModelMode === 'TCN'
-                ? 'bg-fuchsia-500 text-white shadow-md shadow-fuchsia-500/30'
+              activeModelMode === 'STEP'
+                ? 'bg-amber-500 text-slate-950 shadow-md shadow-amber-500/30'
                 : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
             }`}
-            title="TCN: Temporal Convolutional Speed Filter + 15-State ES-EKF (NHC Physics Engine)"
+            title="STEP: Footstep Vibration Detector (0.65m Discrete Stride + Pocket ZUPT Anti-Spiral)"
           >
-            <Activity className="w-3 h-3" />
-            <span>TCN</span>
+            <Footprints className="w-3 h-3" />
+            <span>STEP</span>
           </button>
         </div>
       </div>

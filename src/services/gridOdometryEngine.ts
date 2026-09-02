@@ -12,7 +12,6 @@ import type {
 } from '../types';
 import { computeRobustCompassHeading, normalizeDegrees } from '../utils/orientation';
 import { aiInertialEngine } from './aiInertialEngine';
-import { esEkfEngine } from './esEkfEngine';
 
 export interface GridTrackerState {
   currentX: number;
@@ -136,6 +135,12 @@ export class GridOdometryEngine {
       source = 'alpha';
     }
 
+    // In STEP mode: Pocket ZUPT freezes heading angle to stop kitchen spiral effect
+    if (aiInertialEngine.getModelMode() === 'STEP' && aiInertialEngine.getMetrics().isPocketZupt) {
+      this.notify(false);
+      return;
+    }
+
     this.headingData = {
       heading: Number(rawHeading.toFixed(1)),
       rawHeading: Number(rawHeading.toFixed(1)),
@@ -166,6 +171,7 @@ export class GridOdometryEngine {
       gx,
       gy,
       gz,
+      this.headingData.heading,
       timestamp,
       (displacementMeters, speedMps, _headingDeltaDeg) => {
         this.handleOdometryStep(displacementMeters, speedMps, timestamp);
@@ -208,16 +214,8 @@ export class GridOdometryEngine {
       return;
     }
 
-    const thetaDeg =
-      aiInertialEngine.getModelMode() === 'TCN'
-        ? esEkfEngine.getState().headingDeg
-        : this.headingData.heading;
-
-    if (aiInertialEngine.getModelMode() === 'TCN') {
-      this.headingData.heading = Number(thetaDeg.toFixed(1));
-    }
-
-    const thetaRad = (thetaDeg * Math.PI) / 180;
+    // Discrete updates: x_new = x_old + stride * sin(heading), y_new = y_old + stride * cos(heading)
+    const thetaRad = (this.headingData.heading * Math.PI) / 180;
     const dx = displacementMeters * Math.sin(thetaRad);
     const dy = displacementMeters * Math.cos(thetaRad);
 
@@ -257,7 +255,6 @@ export class GridOdometryEngine {
       rawHeading: norm,
       source: 'simulated',
     };
-    esEkfEngine.setHeading(norm);
     this.notify(true);
   }
 
