@@ -39,8 +39,13 @@ export const TelemetryBar: React.FC<TelemetryBarProps> = ({
           <span className="text-lg font-bold text-indigo-300">{Math.round(headingData.heading)}°</span>
           <span className="text-[10px] text-slate-500 uppercase truncate">SRC: {headingData.source}</span>
         </div>
-        <div className="text-[10px] text-slate-400 truncate">
-          Pitch: {headingData.pitch.toFixed(0)}° | Roll: {headingData.roll.toFixed(0)}°
+        <div className="text-[10px] text-slate-400 truncate flex items-center justify-between">
+          <span>Pitch: {headingData.pitch.toFixed(0)}° | Roll: {headingData.roll.toFixed(0)}°</span>
+          <span className={`text-[9px] px-1 rounded font-bold ${
+            aiMetrics.isTiltCompensationEnabled ? 'text-sky-400 bg-sky-950/60 border border-sky-800/60' : 'text-slate-500'
+          }`}>
+            TILT {aiMetrics.isTiltCompensationEnabled ? 'ON' : 'OFF'}
+          </span>
         </div>
       </div>
 
@@ -83,7 +88,7 @@ export const TelemetryBar: React.FC<TelemetryBarProps> = ({
           </span>
         </div>
         <div className="text-[10px] text-slate-500 truncate flex items-center justify-between">
-          <span>Inferences: {aiMetrics.totalInferences}</span>
+          <span>Var: <strong className="text-slate-300">{aiMetrics.motionVariance.toFixed(3)}</strong> / {aiMetrics.restThreshold.toFixed(2)}</span>
           {aiMetrics.activeMode === 'SIH-Rect' && (
             <span className="text-indigo-400 font-semibold">
               Drift: {aiMetrics.residualCorrectionMeters >= 0 ? `+${aiMetrics.residualCorrectionMeters.toFixed(2)}` : aiMetrics.residualCorrectionMeters.toFixed(2)}m

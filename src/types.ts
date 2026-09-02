@@ -65,6 +65,10 @@ export interface AIInferenceMetrics {
   activeMode: 'SIH' | 'SIH-Rect' | 'SIH-Rect-scaled';
   residualCorrectionMeters: number;
   residualSpeedMps: number;
+  isTiltCompensationEnabled: boolean;
+  restThreshold: number;
+  pitchDeg: number;
+  rollDeg: number;
   errorMessage?: string;
 }
 

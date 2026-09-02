@@ -8,6 +8,7 @@
 
 import * as ort from 'onnxruntime-web';
 import { GaussianIMUFilter6D } from '../utils/filter';
+import { orientationAligner } from './orientationAligner';
 import type { AIInferenceMetrics, ModelMode } from '../types';
 
 export type AIStateListener = (metrics: AIInferenceMetrics) => void;
@@ -25,6 +26,7 @@ export class AIInertialEngine {
   private isInferring: boolean = false;
   
   private activeMode: ModelMode = 'SIH'; // Default is SIH
+  private restThreshold: number = 0.15; // User-configurable global REST threshold slider
 
   private readonly seqLenSih: number = 20;
   private readonly seqLenTrans: number = 60; // 1.0s @ 60Hz
@@ -66,6 +68,10 @@ export class AIInertialEngine {
     activeMode: 'SIH',
     residualCorrectionMeters: 0,
     residualSpeedMps: 0,
+    isTiltCompensationEnabled: true,
+    restThreshold: 0.15,
+    pitchDeg: 0,
+    rollDeg: 0,
   };
 
   private latencies: number[] = [];
@@ -115,6 +121,28 @@ export class AIInertialEngine {
 
   public getModelMode(): ModelMode {
     return this.activeMode;
+  }
+
+  public setRestThreshold(val: number) {
+    this.restThreshold = Math.max(0.01, Math.min(1.0, val));
+    this.metrics.restThreshold = Number(this.restThreshold.toFixed(3));
+    console.log(`[AI Engine] Rest Threshold set to: ${this.metrics.restThreshold}`);
+    this.notify();
+  }
+
+  public getRestThreshold(): number {
+    return this.restThreshold;
+  }
+
+  public setTiltCompensation(enabled: boolean) {
+    orientationAligner.enabled = enabled;
+    this.metrics.isTiltCompensationEnabled = enabled;
+    console.log(`[AI Engine] 3D Tilt Compensation: ${enabled ? 'ENABLED' : 'DISABLED'}`);
+    this.notify();
+  }
+
+  public isTiltCompensationEnabled(): boolean {
+    return orientationAligner.enabled;
   }
 
   /**
@@ -205,6 +233,9 @@ export class AIInertialEngine {
 
   /**
    * Processes incoming 6-DOF IMU sample.
+   * 1. 3D Tilt Compensation: Rotates gravity to +Z and aligns axes globally for all models.
+   * 2. Gaussian smoothing filter over 6-DOF channels.
+   * 3. Dispatches 5Hz inference.
    */
   public processSensorSample(
     rawAx: number,
@@ -216,13 +247,27 @@ export class AIInertialEngine {
     timestamp: number = Date.now(),
     onInferenceOutput?: (displacementMeters: number, instantaneousSpeedMps: number, instantaneousHeadingDeltaDeg: number) => void
   ) {
-    const smoothed = this.gaussianFilter.process(
+    // 1. Dynamic 3D Gravity Tilt Alignment
+    const aligned = orientationAligner.alignIMU(
       rawAx,
       rawAy,
       rawAz,
       rawGxDeg,
       rawGyDeg,
       rawGzDeg
+    );
+
+    this.metrics.pitchDeg = Number(aligned.pitchDeg.toFixed(1));
+    this.metrics.rollDeg = Number(aligned.rollDeg.toFixed(1));
+
+    // 2. Discrete Gaussian Smoothing
+    const smoothed = this.gaussianFilter.process(
+      aligned.ax,
+      aligned.ay,
+      aligned.az,
+      aligned.gx,
+      aligned.gy,
+      aligned.gz
     );
 
     const degToRad = Math.PI / 180;
@@ -242,8 +287,15 @@ export class AIInertialEngine {
       this.imuBuffer.shift();
     }
 
-    // Raw 6-DOF format for Transformer: [ax, ay, az, gx, gy, gz]
-    const rawSample = [rawAx, rawAy, rawAz, rawGxDeg * degToRad, rawGyDeg * degToRad, rawGzDeg * degToRad];
+    // Tilt-aligned 6-DOF format for Transformer: [ax, ay, az, gx, gy, gz]
+    const rawSample = [
+      aligned.ax,
+      aligned.ay,
+      aligned.az,
+      aligned.gx * degToRad,
+      aligned.gy * degToRad,
+      aligned.gz * degToRad,
+    ];
     this.rawImuBuffer60.push(rawSample);
     if (this.rawImuBuffer60.length > this.seqLenTrans) {
       this.rawImuBuffer60.shift();
@@ -267,7 +319,7 @@ export class AIInertialEngine {
     this.isInferring = true;
 
     try {
-      // Step 1: Physical Zero-Velocity Detection (ZUPT Gate)
+      // Step 1: Physical Zero-Velocity Detection (Configured via Global REST Slider)
       let sumNorm = 0;
       let sumSqNorm = 0;
       let sumGyro = 0;
@@ -286,13 +338,13 @@ export class AIInertialEngine {
       const accelVariance = Math.max(0, (sumSqNorm / n) - (meanNorm * meanNorm));
       const avgGyroDeg = sumGyro / n;
 
-      // Elevated Rest Detection (less hyper-sensitive to micro-tremors and ambient vibrations)
-      // SIH-Rect-scaled uses elevated threshold: 0.22 accel variance and 4.5 deg/s gyro
-      // SIH / SIH-Rect uses 0.12 accel variance and 3.0 deg/s gyro (raised from 0.05 / 1.8)
-      const restAccelThresh = (this.activeMode === 'SIH-Rect-scaled') ? 0.22 : 0.12;
-      const restGyroThresh = (this.activeMode === 'SIH-Rect-scaled') ? 4.5 : 3.0;
+      // Global Rest Sensitivity (Scalable via interactive UI Slider)
+      const effectiveAccelThresh = this.activeMode === 'SIH-Rect-scaled'
+        ? this.restThreshold * 1.5
+        : this.restThreshold;
+      const effectiveGyroThresh = Math.max(1.8, effectiveAccelThresh * 22.0);
 
-      const isStationary = accelVariance < restAccelThresh && avgGyroDeg < restGyroThresh;
+      const isStationary = accelVariance < effectiveAccelThresh && avgGyroDeg < effectiveGyroThresh;
       this.metrics.isStationary = isStationary;
       this.metrics.motionVariance = Number(accelVariance.toFixed(4));
 

@@ -326,6 +326,12 @@ export const App: React.FC = () => {
               setModelMode(m);
               aiInertialEngine.setModelMode(m);
             }}
+            isTiltCompensationEnabled={aiMetrics.isTiltCompensationEnabled}
+            onToggleTiltCompensation={() =>
+              aiInertialEngine.setTiltCompensation(!aiMetrics.isTiltCompensationEnabled)
+            }
+            restThreshold={aiMetrics.restThreshold}
+            onSetRestThreshold={(val) => aiInertialEngine.setRestThreshold(val)}
             onInjectSample={handleInjectSample}
             onToggleSimulator={toggleSimulator}
             onRequestPermissions={requestSensorPermissions}

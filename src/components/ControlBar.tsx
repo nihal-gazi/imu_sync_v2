@@ -11,6 +11,8 @@ import {
   Cpu,
   Sparkles,
   Gauge,
+  SlidersHorizontal,
+  Layers,
 } from 'lucide-react';
 import type { ModelMode } from '../types';
 
@@ -20,6 +22,10 @@ interface ControlBarProps {
   currentHeading: number;
   activeModelMode: ModelMode;
   onSelectModelMode: (mode: ModelMode) => void;
+  isTiltCompensationEnabled: boolean;
+  onToggleTiltCompensation: () => void;
+  restThreshold: number;
+  onSetRestThreshold: (val: number) => void;
   onInjectSample: (ax?: number, ay?: number, az?: number) => void;
   onToggleSimulator: () => void;
   onRequestPermissions: () => void;
@@ -33,6 +39,10 @@ export const ControlBar: React.FC<ControlBarProps> = ({
   currentHeading,
   activeModelMode,
   onSelectModelMode,
+  isTiltCompensationEnabled,
+  onToggleTiltCompensation,
+  restThreshold,
+  onSetRestThreshold,
   onInjectSample,
   onToggleSimulator,
   onRequestPermissions,
@@ -88,6 +98,73 @@ export const ControlBar: React.FC<ControlBarProps> = ({
             <Gauge className="w-3 h-3" />
             <span>SIH-Rect-scaled</span>
           </button>
+        </div>
+      </div>
+
+      {/* Global Controls: 3D Tilt Compensation & Manual REST Threshold Slider */}
+      <div className="p-2 bg-slate-950/80 border border-slate-800 rounded-lg flex flex-col gap-2">
+        {/* Tilt Compensation Toggle */}
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-1.5 text-slate-300">
+            <Layers className="w-3.5 h-3.5 text-sky-400" />
+            <span className="text-[11px] font-semibold">GLOBAL 3D TILT COMP:</span>
+          </div>
+          <button
+            onClick={onToggleTiltCompensation}
+            className={`px-2.5 py-0.5 rounded text-[10px] font-bold border transition-all ${
+              isTiltCompensationEnabled
+                ? 'bg-sky-500/20 text-sky-300 border-sky-500/40 shadow-sm shadow-sky-500/20'
+                : 'bg-slate-800 text-slate-400 border-slate-700'
+            }`}
+            title="Dynamically align 3D Gravity to +Z for all models via Rodrigues Rotation"
+          >
+            {isTiltCompensationEnabled ? 'ACTIVE (RODRIGUES)' : 'DISABLED (RAW)'}
+          </button>
+        </div>
+
+        {/* Manual REST Threshold Slider */}
+        <div className="flex flex-col gap-1 pt-1 border-t border-slate-800/70">
+          <div className="flex items-center justify-between text-[11px]">
+            <div className="flex items-center gap-1.5 text-slate-300">
+              <SlidersHorizontal className="w-3.5 h-3.5 text-amber-400" />
+              <span className="font-semibold">REST THRESHOLD (ZUPT):</span>
+            </div>
+            <span className="text-amber-400 font-bold bg-amber-500/10 px-1.5 py-0.5 rounded border border-amber-500/30">
+              {restThreshold.toFixed(2)} m²/s⁴
+            </span>
+          </div>
+          
+          <input
+            type="range"
+            min="0.02"
+            max="0.50"
+            step="0.01"
+            value={restThreshold}
+            onChange={(e) => onSetRestThreshold(parseFloat(e.target.value))}
+            className="w-full accent-amber-500 h-1.5 bg-slate-800 rounded-lg cursor-pointer"
+            title="Adjust physical resting sensitivity threshold"
+          />
+
+          <div className="flex items-center justify-between gap-1 text-[9px] text-slate-400 pt-0.5">
+            <button
+              onClick={() => onSetRestThreshold(0.05)}
+              className={`px-1.5 py-0.5 rounded border ${restThreshold <= 0.08 ? 'bg-amber-500/20 text-amber-300 border-amber-500/40' : 'border-slate-800 hover:bg-slate-800'}`}
+            >
+              Sensitive (0.05)
+            </button>
+            <button
+              onClick={() => onSetRestThreshold(0.15)}
+              className={`px-1.5 py-0.5 rounded border ${restThreshold > 0.08 && restThreshold <= 0.22 ? 'bg-amber-500/20 text-amber-300 border-amber-500/40' : 'border-slate-800 hover:bg-slate-800'}`}
+            >
+              Balanced (0.15)
+            </button>
+            <button
+              onClick={() => onSetRestThreshold(0.30)}
+              className={`px-1.5 py-0.5 rounded border ${restThreshold > 0.22 ? 'bg-amber-500/20 text-amber-300 border-amber-500/40' : 'border-slate-800 hover:bg-slate-800'}`}
+            >
+              Firm (0.30)
+            </button>
+          </div>
         </div>
       </div>
       {/* Action Buttons Row */}
