@@ -98,6 +98,18 @@ export const ControlBar: React.FC<ControlBarProps> = ({
             <Gauge className="w-3 h-3" />
             <span>SIH-Rect-scaled</span>
           </button>
+          <button
+            onClick={() => onSelectModelMode('TCN')}
+            className={`px-2 py-1 rounded-md text-xs font-bold transition-all flex items-center gap-1 ${
+              activeModelMode === 'TCN'
+                ? 'bg-fuchsia-500 text-white shadow-md shadow-fuchsia-500/30'
+                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
+            }`}
+            title="TCN: Temporal Convolutional Speed Filter + 15-State ES-EKF (NHC Physics Engine)"
+          >
+            <Activity className="w-3 h-3" />
+            <span>TCN</span>
+          </button>
         </div>
       </div>
 

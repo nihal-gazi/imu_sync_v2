@@ -62,9 +62,13 @@ export interface AIInferenceMetrics {
   isStationary: boolean;
   motionVariance: number;
   modelName: string;
-  activeMode: 'SIH' | 'SIH-Rect' | 'SIH-Rect-scaled';
+  activeMode: 'SIH' | 'SIH-Rect' | 'SIH-Rect-scaled' | 'TCN';
   residualCorrectionMeters: number;
   residualSpeedMps: number;
+  tcnForwardSpeedMps: number;
+  tcnZuptProbability: number;
+  esEkfAccelBias: [number, number, number];
+  esEkfGyroBias: [number, number, number];
   isTiltCompensationEnabled: boolean;
   restThreshold: number;
   pitchDeg: number;
@@ -72,7 +76,7 @@ export interface AIInferenceMetrics {
   errorMessage?: string;
 }
 
-export type ModelMode = 'SIH' | 'SIH-Rect' | 'SIH-Rect-scaled';
+export type ModelMode = 'SIH' | 'SIH-Rect' | 'SIH-Rect-scaled' | 'TCN';
 
 export interface SensorStatus {
   gyroAvailable: boolean;

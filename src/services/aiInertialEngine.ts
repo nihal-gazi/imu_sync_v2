@@ -3,12 +3,14 @@
  * Supports:
  * 1. "SIH" (Default): Monolithic ONNX MLP via WebGPU / WASM with ZUPT anti-drift gate.
  * 2. "SIH-Rect": Transformer 1.0s Residual Drift Rectification on 60Hz IMU stream.
- * Optimized for zero-garbage collection, non-blocking mobile load, and leak-free inference.
+ * 3. "SIH-Rect-scaled": 40x Scaled Velocity + High-Threshold ZUPT Rest Gate.
+ * 4. "TCN": Dilated 1D-CNN Speed Filter + 15-State ES-EKF Physics Engine (NHC Constraints).
  */
 
 import * as ort from 'onnxruntime-web';
 import { GaussianIMUFilter6D } from '../utils/filter';
 import { orientationAligner } from './orientationAligner';
+import { esEkfEngine } from './esEkfEngine';
 import type { AIInferenceMetrics, ModelMode } from '../types';
 
 export type AIStateListener = (metrics: AIInferenceMetrics) => void;
@@ -22,6 +24,8 @@ interface ScalerParams {
 export class AIInertialEngine {
   private sessionSih: ort.InferenceSession | null = null;
   private sessionTransformer: ort.InferenceSession | null = null;
+  private sessionTcn: ort.InferenceSession | null = null;
+
   private isInitializing: boolean = false;
   private isInferring: boolean = false;
   
@@ -30,6 +34,7 @@ export class AIInertialEngine {
 
   private readonly seqLenSih: number = 20;
   private readonly seqLenTrans: number = 60; // 1.0s @ 60Hz
+  private readonly seqLenTcn: number = 20;   // 2.0s @ 10Hz
   private readonly inFeatures: number = 6;
   
   // 6-DOF Gaussian filter instance (Kernel Size: 7, Sigma: 1.2)
@@ -38,17 +43,28 @@ export class AIInertialEngine {
   // Rolling IMU buffers
   private imuBuffer: number[][] = []; // 20 samples for SIH
   private rawImuBuffer60: number[][] = []; // 60 samples for Transformer
+  private tcnBuffer: number[][] = []; // 20 samples @ 10Hz for TCN
+  
   private lastInferenceTime: number = 0;
   private readonly inferenceIntervalMs: number = 200; // 5Hz inference rate
+  private lastTcnSampleTime: number = 0;
+  private lastEkfTime: number = 0;
   
   // Pre-allocated static tensor buffers
   private readonly flatDataSih = new Float32Array(20 * 6);
   private readonly flatDataTrans = new Float32Array(60 * 6);
+  private readonly flatDataTcn = new Float32Array(20 * 6);
   
   private scaler: ScalerParams = {
     mean: [0, 0, 9.81, 0, 0, 0],
     std: [1, 1, 1, 0.1, 0.1, 0.1],
     seq_len: 60,
+  };
+
+  private tcnScaler: ScalerParams = {
+    mean: [0, 0, 9.81, 0, 0, 0],
+    std: [1, 1, 1, 0.1, 0.1, 0.1],
+    seq_len: 20,
   };
 
   private metrics: AIInferenceMetrics = {
@@ -68,6 +84,10 @@ export class AIInertialEngine {
     activeMode: 'SIH',
     residualCorrectionMeters: 0,
     residualSpeedMps: 0,
+    tcnForwardSpeedMps: 0,
+    tcnZuptProbability: 0,
+    esEkfAccelBias: [0, 0, 0],
+    esEkfGyroBias: [0, 0, 0],
     isTiltCompensationEnabled: true,
     restThreshold: 0.15,
     pitchDeg: 0,
@@ -108,7 +128,9 @@ export class AIInertialEngine {
   public setModelMode(mode: ModelMode) {
     this.activeMode = mode;
     this.metrics.activeMode = mode;
-    if (mode === 'SIH-Rect-scaled') {
+    if (mode === 'TCN') {
+      this.metrics.modelName = 'TCN Speed Filter (15-State ES-EKF + NHC)';
+    } else if (mode === 'SIH-Rect-scaled') {
       this.metrics.modelName = 'SIH-Rect-scaled (40x Scaled + Elevated Rest Gate)';
     } else if (mode === 'SIH-Rect') {
       this.metrics.modelName = 'SIH-Rect (Transformer Residual Drift Corrected)';
@@ -126,7 +148,6 @@ export class AIInertialEngine {
   public setRestThreshold(val: number) {
     this.restThreshold = Math.max(0.01, Math.min(1.0, val));
     this.metrics.restThreshold = Number(this.restThreshold.toFixed(3));
-    console.log(`[AI Engine] Rest Threshold set to: ${this.metrics.restThreshold}`);
     this.notify();
   }
 
@@ -137,7 +158,6 @@ export class AIInertialEngine {
   public setTiltCompensation(enabled: boolean) {
     orientationAligner.enabled = enabled;
     this.metrics.isTiltCompensationEnabled = enabled;
-    console.log(`[AI Engine] 3D Tilt Compensation: ${enabled ? 'ENABLED' : 'DISABLED'}`);
     this.notify();
   }
 
@@ -146,12 +166,14 @@ export class AIInertialEngine {
   }
 
   /**
-   * Initializes both the SIH base model and the SIH-Rect residual transformer.
+   * Initializes all Edge AI models: SIH MLP, SIH-Rect Transformer, and TCN Speed Filter.
    */
   public async initializeModel(
     sihUrl: string = '/models/inertial_mlp.onnx',
     transformerUrl: string = '/models/sih_rect_transformer.onnx',
-    scalerUrl: string = '/models/rect_scaler.json'
+    scalerUrl: string = '/models/rect_scaler.json',
+    tcnUrl: string = '/models/tcn_speed_filter.onnx',
+    tcnScalerUrl: string = '/models/tcn_scaler.json'
   ): Promise<boolean> {
     if (this.sessionSih) return true;
     if (this.isInitializing) return false;
@@ -163,18 +185,18 @@ export class AIInertialEngine {
     await new Promise((resolve) => setTimeout(resolve, 60));
 
     try {
-      // 1. Load Scaler Parameters
+      // 1. Load Scalers
       try {
         const scalerRes = await fetch(scalerUrl);
-        if (scalerRes.ok) {
-          this.scaler = await scalerRes.json();
-          console.log('[AI Engine] Loaded rect_scaler parameters:', this.scaler);
-        }
-      } catch (scalerErr) {
-        console.warn('[AI Engine] Using fallback scalers:', scalerErr);
-      }
+        if (scalerRes.ok) this.scaler = await scalerRes.json();
+      } catch {}
 
-      // 2. Load Base SIH MLP Model
+      try {
+        const tcnScalerRes = await fetch(tcnScalerUrl);
+        if (tcnScalerRes.ok) this.tcnScaler = await tcnScalerRes.json();
+      } catch {}
+
+      // 2. Load Base SIH MLP
       const sihRes = await fetch(sihUrl);
       if (!sihRes.ok) throw new Error(`HTTP ${sihRes.status} fetching ${sihUrl}`);
       const sihBytes = new Uint8Array(await sihRes.arrayBuffer());
@@ -207,10 +229,24 @@ export class AIInertialEngine {
             executionProviders: [usedProvider, 'wasm'],
             graphOptimizationLevel: 'all',
           });
-          console.log('[AI Engine] Loaded SIH-Rect Residual Transformer successfully.');
         }
       } catch (transErr) {
-        console.warn('[AI Engine] Transformer loading notice:', transErr);
+        console.warn('[AI Engine] Transformer notice:', transErr);
+      }
+
+      // 4. Load TCN Speed Filter
+      try {
+        const tcnRes = await fetch(tcnUrl);
+        if (tcnRes.ok) {
+          const tcnBytes = new Uint8Array(await tcnRes.arrayBuffer());
+          this.sessionTcn = await ort.InferenceSession.create(tcnBytes, {
+            executionProviders: [usedProvider, 'wasm'],
+            graphOptimizationLevel: 'all',
+          });
+          console.log('[AI Engine] Loaded TCN Speed Filter successfully.');
+        }
+      } catch (tcnErr) {
+        console.warn('[AI Engine] TCN loading notice:', tcnErr);
       }
 
       this.metrics.isLoaded = !!this.sessionSih;
@@ -234,8 +270,9 @@ export class AIInertialEngine {
   /**
    * Processes incoming 6-DOF IMU sample.
    * 1. 3D Tilt Compensation: Rotates gravity to +Z and aligns axes globally for all models.
-   * 2. Gaussian smoothing filter over 6-DOF channels.
-   * 3. Dispatches 5Hz inference.
+   * 2. Runs ES-EKF predict step.
+   * 3. Buffers samples for SIH, Transformer, and 10Hz TCN.
+   * 4. Dispatches 5Hz inference.
    */
   public processSensorSample(
     rawAx: number,
@@ -260,7 +297,17 @@ export class AIInertialEngine {
     this.metrics.pitchDeg = Number(aligned.pitchDeg.toFixed(1));
     this.metrics.rollDeg = Number(aligned.rollDeg.toFixed(1));
 
-    // 2. Discrete Gaussian Smoothing
+    const degToRad = Math.PI / 180;
+    const gxRad = aligned.gx * degToRad;
+    const gyRad = aligned.gy * degToRad;
+    const gzRad = aligned.gz * degToRad;
+
+    // 2. High-Frequency ES-EKF Predict Step (Newtonian kinematics integration)
+    const dt = this.lastEkfTime > 0 ? (timestamp - this.lastEkfTime) / 1000.0 : 0.0166;
+    this.lastEkfTime = timestamp;
+    esEkfEngine.predict(aligned.ax, aligned.ay, aligned.az, gxRad, gyRad, gzRad, dt);
+
+    // 3. Discrete Gaussian Smoothing for SIH MLP
     const smoothed = this.gaussianFilter.process(
       aligned.ax,
       aligned.ay,
@@ -269,10 +316,7 @@ export class AIInertialEngine {
       aligned.gy,
       aligned.gz
     );
-
-    const degToRad = Math.PI / 180;
     
-    // SIH Format: [ax, ay, az, gz, gx, gy] (rad/s)
     const sihSample = [
       smoothed.ax,
       smoothed.ay,
@@ -287,18 +331,20 @@ export class AIInertialEngine {
       this.imuBuffer.shift();
     }
 
-    // Tilt-aligned 6-DOF format for Transformer: [ax, ay, az, gx, gy, gz]
-    const rawSample = [
-      aligned.ax,
-      aligned.ay,
-      aligned.az,
-      aligned.gx * degToRad,
-      aligned.gy * degToRad,
-      aligned.gz * degToRad,
-    ];
+    // 4. Tilt-aligned 6-DOF format for Transformer: [ax, ay, az, gx, gy, gz]
+    const rawSample = [aligned.ax, aligned.ay, aligned.az, gxRad, gyRad, gzRad];
     this.rawImuBuffer60.push(rawSample);
     if (this.rawImuBuffer60.length > this.seqLenTrans) {
       this.rawImuBuffer60.shift();
+    }
+
+    // 5. Native 10Hz Decimation Buffer for TCN (T=20 samples over 2.0s)
+    if (timestamp - this.lastTcnSampleTime >= 100) {
+      this.lastTcnSampleTime = timestamp;
+      this.tcnBuffer.push(rawSample);
+      if (this.tcnBuffer.length > this.seqLenTcn) {
+        this.tcnBuffer.shift();
+      }
     }
 
     // Trigger inference at 5Hz (200ms)
@@ -338,7 +384,7 @@ export class AIInertialEngine {
       const accelVariance = Math.max(0, (sumSqNorm / n) - (meanNorm * meanNorm));
       const avgGyroDeg = sumGyro / n;
 
-      // Global Rest Sensitivity (Scalable via interactive UI Slider)
+      // Global Rest Sensitivity
       const effectiveAccelThresh = this.activeMode === 'SIH-Rect-scaled'
         ? this.restThreshold * 1.5
         : this.restThreshold;
@@ -355,6 +401,12 @@ export class AIInertialEngine {
         this.metrics.instantaneousTurnDeltaDeg = 0;
         this.metrics.residualCorrectionMeters = 0;
         this.metrics.residualSpeedMps = 0;
+        this.metrics.tcnForwardSpeedMps = 0;
+        this.metrics.tcnZuptProbability = 1.0;
+        esEkfEngine.updateZUPT();
+        const ekfState = esEkfEngine.getState();
+        this.metrics.esEkfAccelBias = ekfState.accelBias;
+        this.metrics.esEkfGyroBias = ekfState.gyroBias;
         this.notify();
 
         if (onInferenceOutput) {
@@ -365,7 +417,79 @@ export class AIInertialEngine {
 
       const t0 = performance.now();
 
-      // Step 2: Run Base SIH MLP
+      // --- BRANCH A: TCN MODEL MODE ---
+      if (this.activeMode === 'TCN' && this.sessionTcn && this.tcnBuffer.length >= this.seqLenTcn) {
+        const mean = this.tcnScaler.mean;
+        const std = this.tcnScaler.std;
+
+        for (let i = 0; i < this.seqLenTcn; i++) {
+          const s = this.tcnBuffer[i];
+          const offset = i * this.inFeatures;
+          for (let c = 0; c < 6; c++) {
+            this.flatDataTcn[offset + c] = (s[c] - (mean[c] || 0)) / (std[c] || 1.0);
+          }
+        }
+
+        const tcnTensor = new ort.Tensor('float32', this.flatDataTcn, [1, this.seqLenTcn, this.inFeatures]);
+        let tcnResults: ort.InferenceSession.ReturnType | null = null;
+        try {
+          tcnResults = await this.sessionTcn.run({ imu_window_10hz: tcnTensor });
+        } finally {
+          tcnTensor.dispose();
+        }
+
+        const tcnOutTensor = tcnResults.tcn_output || Object.values(tcnResults)[0];
+        const tcnData = tcnOutTensor.data as Float32Array;
+
+        const vForwardMps = Math.max(0.0, tcnData[0] || 0);
+        const zuptProb = Math.min(1.0, Math.max(0.0, tcnData[1] || 0));
+
+        for (const key in tcnResults) {
+          tcnResults[key]?.dispose?.();
+        }
+
+        // ES-EKF Update: Non-Holonomic Constraints (NHC) or ZUPT
+        if (zuptProb > 0.5) {
+          esEkfEngine.updateZUPT();
+        } else {
+          esEkfEngine.updateNHC(vForwardMps, 0.15);
+        }
+
+        const ekfState = esEkfEngine.getState();
+        const latency = performance.now() - t0;
+
+        const stepDisplacement = (ekfState.speedKmh / 3.6) * 0.2; // 200ms step
+        const instSpeedMps = ekfState.speedKmh / 3.6;
+
+        this.latencies.push(latency);
+        if (this.latencies.length > 20) this.latencies.shift();
+        const avgLatency = this.latencies.reduce((a, b) => a + b, 0) / this.latencies.length;
+
+        this.metrics.lastLatencyMs = Number(latency.toFixed(1));
+        this.metrics.avgLatencyMs = Number(avgLatency.toFixed(1));
+        this.metrics.totalInferences += 1;
+        this.metrics.lastDisplacement = {
+          dx: Number((stepDisplacement * Math.sin((ekfState.headingDeg * Math.PI) / 180)).toFixed(3)),
+          dy: Number((stepDisplacement * Math.cos((ekfState.headingDeg * Math.PI) / 180)).toFixed(3)),
+          magnitude: Number(stepDisplacement.toFixed(3)),
+        };
+        this.metrics.instantaneousSpeedMps = Number(instSpeedMps.toFixed(2));
+        this.metrics.instantaneousSpeedKmh = Number(ekfState.speedKmh.toFixed(1));
+        this.metrics.instantaneousTurnDeltaDeg = 0;
+        this.metrics.tcnForwardSpeedMps = Number(vForwardMps.toFixed(2));
+        this.metrics.tcnZuptProbability = Number(zuptProb.toFixed(3));
+        this.metrics.esEkfAccelBias = ekfState.accelBias;
+        this.metrics.esEkfGyroBias = ekfState.gyroBias;
+
+        this.notify();
+
+        if (onInferenceOutput) {
+          onInferenceOutput(stepDisplacement, instSpeedMps, 0);
+        }
+        return;
+      }
+
+      // --- BRANCH B: SIH / SIH-Rect / SIH-Rect-scaled ---
       for (let i = 0; i < this.seqLenSih; i++) {
         const s = this.imuBuffer[i];
         const offset = i * this.inFeatures;
@@ -398,13 +522,12 @@ export class AIInertialEngine {
         sihResults[key]?.dispose?.();
       }
 
-      // Step 3: Run Transformer Residual Correction if active
+      // Transformer Residual Correction
       let deltaResidualDisp = 0;
       let deltaResidualSpeed = 0;
       const isRectMode = this.activeMode === 'SIH-Rect' || this.activeMode === 'SIH-Rect-scaled';
 
       if (isRectMode && this.sessionTransformer && this.rawImuBuffer60.length >= this.seqLenTrans) {
-        // Normalize 60-sample window
         const mean = this.scaler.mean;
         const std = this.scaler.std;
 
@@ -427,7 +550,6 @@ export class AIInertialEngine {
         const transOutTensor = transResults.residual_corrections || Object.values(transResults)[0];
         const transData = transOutTensor.data as Float32Array;
         
-        // Predictions over 0.5s interval scaled to 0.2s inference step
         deltaResidualDisp = (transData[0] || 0) * (0.2 / 0.5);
         deltaResidualSpeed = (transData[1] || 0);
 
@@ -435,12 +557,11 @@ export class AIInertialEngine {
           transResults[key]?.dispose?.();
         }
 
-        // Apply Dynamic Rectification
         magnitude = Math.max(0.0, magnitude + deltaResidualDisp);
         instSpeedMps = Math.max(0.0, instSpeedMps + deltaResidualSpeed);
       }
 
-      // Step 4: Scale down velocity by 40x for SIH-Rect-scaled
+      // 40x Scale-down for SIH-Rect-scaled
       if (this.activeMode === 'SIH-Rect-scaled') {
         const scaleFactor = 1.0 / 40.0;
         magnitude *= scaleFactor;
@@ -486,9 +607,13 @@ export class AIInertialEngine {
 
   public reset() {
     this.gaussianFilter.reset();
+    esEkfEngine.reset();
     this.imuBuffer = [];
     this.rawImuBuffer60 = [];
+    this.tcnBuffer = [];
     this.lastInferenceTime = 0;
+    this.lastTcnSampleTime = 0;
+    this.lastEkfTime = 0;
     this.isInferring = false;
     this.latencies = [];
     this.metrics.lastDisplacement = { dx: 0, dy: 0, magnitude: 0 };
@@ -500,6 +625,10 @@ export class AIInertialEngine {
     this.metrics.totalInferences = 0;
     this.metrics.residualCorrectionMeters = 0;
     this.metrics.residualSpeedMps = 0;
+    this.metrics.tcnForwardSpeedMps = 0;
+    this.metrics.tcnZuptProbability = 0;
+    this.metrics.esEkfAccelBias = [0, 0, 0];
+    this.metrics.esEkfGyroBias = [0, 0, 0];
     this.notify();
   }
 }

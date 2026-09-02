@@ -40,12 +40,14 @@ export const App: React.FC = () => {
       setAiMetrics(metrics);
     });
 
-    // Initialize both SIH Base MLP and SIH-Rect Residual Transformer
+    // Initialize SIH Base MLP, SIH-Rect Residual Transformer, and TCN Speed Filter
     const timer = setTimeout(() => {
       aiInertialEngine.initializeModel(
         '/models/inertial_mlp.onnx',
         '/models/sih_rect_transformer.onnx',
-        '/models/rect_scaler.json'
+        '/models/rect_scaler.json',
+        '/models/tcn_speed_filter.onnx',
+        '/models/tcn_scaler.json'
       );
     }, 100);
 
@@ -253,12 +255,15 @@ export const App: React.FC = () => {
             <div className="text-sm font-bold text-white flex items-center gap-2">
               <span>IMU GRID TRACKER</span>
               <span className={`text-[10px] px-2 py-0.5 rounded border font-bold flex items-center gap-1 ${
-                modelMode === 'SIH-Rect-scaled'
+                modelMode === 'TCN'
+                  ? 'bg-fuchsia-500/20 text-fuchsia-300 border-fuchsia-500/40'
+                  : modelMode === 'SIH-Rect-scaled'
                   ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
                   : modelMode === 'SIH-Rect'
                   ? 'bg-indigo-500/20 text-indigo-300 border-indigo-500/40'
                   : 'bg-cyan-500/20 text-cyan-300 border-cyan-500/40'
               }`}>
+                {modelMode === 'TCN' && <Activity className="w-2.5 h-2.5" />}
                 {modelMode === 'SIH-Rect-scaled' && <Gauge className="w-2.5 h-2.5" />}
                 {modelMode === 'SIH-Rect' && <Sparkles className="w-2.5 h-2.5" />}
                 <span>{modelMode}</span>
@@ -272,7 +277,9 @@ export const App: React.FC = () => {
               </span>
             </div>
             <div className="text-[11px] text-slate-400">
-              {modelMode === 'SIH-Rect-scaled'
+              {modelMode === 'TCN'
+                ? 'TCN Dilated 1D-CNN Speed Filter + 15-State ES-EKF (NHC Physics Engine)'
+                : modelMode === 'SIH-Rect-scaled'
                 ? 'SIH-Rectified (40x Scaled Velocity & High-Threshold Anti-Drift Rest Gate)'
                 : modelMode === 'SIH-Rect'
                 ? 'SIH Multi-Head MLP + Transformer 1.0s Residual Drift Rectification'
