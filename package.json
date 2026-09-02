@@ -1,0 +1,28 @@
+{
+  "name": "imu-grid-tracker",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "lucide-react": "^1.16.0",
+    "onnxruntime-web": "^1.21.0-dev.20250206-b9ee083e9a",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.4",
+    "@types/react": "^19.0.10",
+    "@types/react-dom": "^19.0.4",
+    "@vitejs/plugin-basic-ssl": "^1.2.0",
+    "@vitejs/plugin-react": "^4.3.4",
+    "@tailwindcss/vite": "^4.0.8",
+    "tailwindcss": "^4.0.8",
+    "typescript": "~5.7.2",
+    "vite": "^6.1.0"
+  }
+}
