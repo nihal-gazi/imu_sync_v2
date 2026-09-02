@@ -1,4 +1,3 @@
-import React from 'react';
 import {
   Activity,
   Play,
@@ -9,12 +8,17 @@ import {
   Compass,
   ShieldAlert,
   ShieldCheck,
+  Cpu,
+  Sparkles,
 } from 'lucide-react';
+import type { ModelMode } from '../types';
 
 interface ControlBarProps {
   isSimulating: boolean;
   permissionGranted: boolean;
   currentHeading: number;
+  activeModelMode: ModelMode;
+  onSelectModelMode: (mode: ModelMode) => void;
   onInjectSample: (ax?: number, ay?: number, az?: number) => void;
   onToggleSimulator: () => void;
   onRequestPermissions: () => void;
@@ -26,6 +30,8 @@ export const ControlBar: React.FC<ControlBarProps> = ({
   isSimulating,
   permissionGranted,
   currentHeading,
+  activeModelMode,
+  onSelectModelMode,
   onInjectSample,
   onToggleSimulator,
   onRequestPermissions,
@@ -39,6 +45,38 @@ export const ControlBar: React.FC<ControlBarProps> = ({
 
   return (
     <div className="flex flex-col gap-2.5 p-3 bg-slate-900 border border-slate-800 rounded-xl shadow-xl font-mono text-xs">
+      {/* Model Selection Bar */}
+      <div className="flex items-center justify-between p-1.5 bg-slate-950 border border-slate-800 rounded-lg">
+        <div className="flex items-center gap-1.5 text-slate-400 font-semibold px-1">
+          <Cpu className="w-3.5 h-3.5 text-cyan-400" />
+          <span className="text-[11px]">AI ENGINE:</span>
+        </div>
+        <div className="flex items-center gap-1.5">
+          <button
+            onClick={() => onSelectModelMode('SIH')}
+            className={`px-3 py-1 rounded-md text-xs font-bold transition-all flex items-center gap-1 ${
+              activeModelMode === 'SIH'
+                ? 'bg-cyan-500 text-slate-950 shadow-md shadow-cyan-500/30'
+                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
+            }`}
+            title="SIH Multi-Head Inertial MLP (Monolithic Base)"
+          >
+            <span>SIH</span>
+          </button>
+          <button
+            onClick={() => onSelectModelMode('SIH-Rect')}
+            className={`px-3 py-1 rounded-md text-xs font-bold transition-all flex items-center gap-1 ${
+              activeModelMode === 'SIH-Rect'
+                ? 'bg-indigo-500 text-white shadow-md shadow-indigo-500/30'
+                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
+            }`}
+            title="SIH-Rect: Transformer 1.0s Residual Drift Rectification"
+          >
+            <Sparkles className="w-3 h-3" />
+            <span>SIH-Rect</span>
+          </button>
+        </div>
+      </div>
       {/* Action Buttons Row */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
         <button

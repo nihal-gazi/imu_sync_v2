@@ -1,33 +1,54 @@
 /**
  * Edge AI Inertial Odometry Engine.
- * Runs monolithic ONNX MLP via WebGPU / WASM with ZUPT anti-drift gate.
+ * Supports:
+ * 1. "SIH" (Default): Monolithic ONNX MLP via WebGPU / WASM with ZUPT anti-drift gate.
+ * 2. "SIH-Rect": Transformer 1.0s Residual Drift Rectification on 60Hz IMU stream.
  * Optimized for zero-garbage collection, non-blocking mobile load, and leak-free inference.
  */
 
 import * as ort from 'onnxruntime-web';
 import { GaussianIMUFilter6D } from '../utils/filter';
-import type { AIInferenceMetrics } from '../types';
+import type { AIInferenceMetrics, ModelMode } from '../types';
 
 export type AIStateListener = (metrics: AIInferenceMetrics) => void;
 
+interface ScalerParams {
+  mean: number[];
+  std: number[];
+  seq_len: number;
+}
+
 export class AIInertialEngine {
-  private session: ort.InferenceSession | null = null;
+  private sessionSih: ort.InferenceSession | null = null;
+  private sessionTransformer: ort.InferenceSession | null = null;
   private isInitializing: boolean = false;
   private isInferring: boolean = false;
-  private readonly seqLen: number = 20;
+  
+  private activeMode: ModelMode = 'SIH'; // Default is SIH
+
+  private readonly seqLenSih: number = 20;
+  private readonly seqLenTrans: number = 60; // 1.0s @ 60Hz
   private readonly inFeatures: number = 6;
   
   // 6-DOF Gaussian filter instance (Kernel Size: 7, Sigma: 1.2)
   private gaussianFilter = new GaussianIMUFilter6D(7, 1.2);
   
-  // Rolling IMU buffer of Gaussian-smoothed features: [ax, ay, az, gz_rad, gx_rad, gy_rad]
-  private imuBuffer: number[][] = [];
+  // Rolling IMU buffers
+  private imuBuffer: number[][] = []; // 20 samples for SIH
+  private rawImuBuffer60: number[][] = []; // 60 samples for Transformer
   private lastInferenceTime: number = 0;
   private readonly inferenceIntervalMs: number = 200; // 5Hz inference rate
   
-  // Pre-allocated static tensor buffer (avoids GC thrashing)
-  private readonly flatData = new Float32Array(20 * 6);
+  // Pre-allocated static tensor buffers
+  private readonly flatDataSih = new Float32Array(20 * 6);
+  private readonly flatDataTrans = new Float32Array(60 * 6);
   
+  private scaler: ScalerParams = {
+    mean: [0, 0, 9.81, 0, 0, 0],
+    std: [1, 1, 1, 0.1, 0.1, 0.1],
+    seq_len: 60,
+  };
+
   private metrics: AIInferenceMetrics = {
     isLoaded: false,
     isLoading: false,
@@ -41,7 +62,10 @@ export class AIInertialEngine {
     instantaneousTurnDeltaDeg: 0,
     isStationary: true,
     motionVariance: 0,
-    modelName: 'Inertial MLP (WebGPU Edge)',
+    modelName: 'SIH MLP (Monolithic Base)',
+    activeMode: 'SIH',
+    residualCorrectionMeters: 0,
+    residualSpeedMps: 0,
   };
 
   private latencies: number[] = [];
@@ -49,7 +73,6 @@ export class AIInertialEngine {
 
   constructor() {
     try {
-      // Configure threads safely without crashing mobile workers
       if (typeof crossOriginIsolated !== 'undefined' && crossOriginIsolated) {
         ort.env.wasm.numThreads = Math.min(2, navigator.hardwareConcurrency || 1);
       } else {
@@ -76,53 +99,89 @@ export class AIInertialEngine {
     return { ...this.metrics };
   }
 
+  public setModelMode(mode: ModelMode) {
+    this.activeMode = mode;
+    this.metrics.activeMode = mode;
+    this.metrics.modelName = mode === 'SIH-Rect'
+      ? 'SIH-Rect (Transformer Residual Drift Corrected)'
+      : 'SIH MLP (Monolithic Base)';
+    console.log(`[AI Engine] Active Model switched to: ${mode}`);
+    this.notify();
+  }
+
+  public getModelMode(): ModelMode {
+    return this.activeMode;
+  }
+
   /**
-   * Initializes the ONNX MLP session from a monolithic binary buffer.
-   * Yields to the event loop so mobile browser renders smoothly on load.
+   * Initializes both the SIH base model and the SIH-Rect residual transformer.
    */
-  public async initializeModel(modelUrl: string = '/models/inertial_mlp.onnx'): Promise<boolean> {
-    if (this.session) return true;
+  public async initializeModel(
+    sihUrl: string = '/models/inertial_mlp.onnx',
+    transformerUrl: string = '/models/sih_rect_transformer.onnx',
+    scalerUrl: string = '/models/rect_scaler.json'
+  ): Promise<boolean> {
+    if (this.sessionSih) return true;
     if (this.isInitializing) return false;
 
     this.isInitializing = true;
     this.metrics.isLoading = true;
     this.notify();
 
-    // Small delay to allow the browser to complete initial paint
-    await new Promise((resolve) => setTimeout(resolve, 80));
+    await new Promise((resolve) => setTimeout(resolve, 60));
 
     try {
-      const response = await fetch(modelUrl);
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status} fetching model: ${response.statusText}`);
+      // 1. Load Scaler Parameters
+      try {
+        const scalerRes = await fetch(scalerUrl);
+        if (scalerRes.ok) {
+          this.scaler = await scalerRes.json();
+          console.log('[AI Engine] Loaded rect_scaler parameters:', this.scaler);
+        }
+      } catch (scalerErr) {
+        console.warn('[AI Engine] Using fallback scalers:', scalerErr);
       }
 
-      const arrayBuffer = await response.arrayBuffer();
-      const modelBytes = new Uint8Array(arrayBuffer);
+      // 2. Load Base SIH MLP Model
+      const sihRes = await fetch(sihUrl);
+      if (!sihRes.ok) throw new Error(`HTTP ${sihRes.status} fetching ${sihUrl}`);
+      const sihBytes = new Uint8Array(await sihRes.arrayBuffer());
 
-      let session: ort.InferenceSession | null = null;
-      let usedProvider: 'webgpu' | 'wasm' = 'webgpu';
-
+      let usedProvider: 'webgpu' | 'wasm' = 'wasm';
       try {
         if ('gpu' in navigator) {
-          session = await ort.InferenceSession.create(modelBytes, {
+          this.sessionSih = await ort.InferenceSession.create(sihBytes, {
             executionProviders: ['webgpu'],
             graphOptimizationLevel: 'all',
           });
           usedProvider = 'webgpu';
         } else {
-          throw new Error('WebGPU not supported.');
+          throw new Error('WebGPU unavailable');
         }
       } catch {
-        session = await ort.InferenceSession.create(modelBytes, {
+        this.sessionSih = await ort.InferenceSession.create(sihBytes, {
           executionProviders: ['wasm'],
           graphOptimizationLevel: 'all',
         });
         usedProvider = 'wasm';
       }
 
-      this.session = session;
-      this.metrics.isLoaded = true;
+      // 3. Load Residual Drift Transformer
+      try {
+        const transRes = await fetch(transformerUrl);
+        if (transRes.ok) {
+          const transBytes = new Uint8Array(await transRes.arrayBuffer());
+          this.sessionTransformer = await ort.InferenceSession.create(transBytes, {
+            executionProviders: [usedProvider, 'wasm'],
+            graphOptimizationLevel: 'all',
+          });
+          console.log('[AI Engine] Loaded SIH-Rect Residual Transformer successfully.');
+        }
+      } catch (transErr) {
+        console.warn('[AI Engine] Transformer loading notice:', transErr);
+      }
+
+      this.metrics.isLoaded = !!this.sessionSih;
       this.metrics.isLoading = false;
       this.metrics.executionProvider = usedProvider;
       this.metrics.errorMessage = undefined;
@@ -141,10 +200,7 @@ export class AIInertialEngine {
   }
 
   /**
-   * Processes an incoming 6-DOF IMU sample.
-   * 1. Gaussian smooths the sample.
-   * 2. Pushes to rolling window.
-   * 3. Triggers inference at 5Hz without blocking high-frequency sampling.
+   * Processes incoming 6-DOF IMU sample.
    */
   public processSensorSample(
     rawAx: number,
@@ -166,7 +222,9 @@ export class AIInertialEngine {
     );
 
     const degToRad = Math.PI / 180;
-    const sample = [
+    
+    // SIH Format: [ax, ay, az, gz, gx, gy] (rad/s)
+    const sihSample = [
       smoothed.ax,
       smoothed.ay,
       smoothed.az,
@@ -175,13 +233,20 @@ export class AIInertialEngine {
       smoothed.gy * degToRad,
     ];
 
-    this.imuBuffer.push(sample);
-    if (this.imuBuffer.length > this.seqLen) {
+    this.imuBuffer.push(sihSample);
+    if (this.imuBuffer.length > this.seqLenSih) {
       this.imuBuffer.shift();
     }
 
-    // Trigger inference if session is ready, buffer is full, and not currently running an inference
-    if (this.session && !this.isInferring && this.imuBuffer.length >= this.seqLen) {
+    // Raw 6-DOF format for Transformer: [ax, ay, az, gx, gy, gz]
+    const rawSample = [rawAx, rawAy, rawAz, rawGxDeg * degToRad, rawGyDeg * degToRad, rawGzDeg * degToRad];
+    this.rawImuBuffer60.push(rawSample);
+    if (this.rawImuBuffer60.length > this.seqLenTrans) {
+      this.rawImuBuffer60.shift();
+    }
+
+    // Trigger inference at 5Hz (200ms)
+    if (this.sessionSih && !this.isInferring && this.imuBuffer.length >= this.seqLenSih) {
       if (timestamp - this.lastInferenceTime >= this.inferenceIntervalMs) {
         this.lastInferenceTime = timestamp;
         this.runInference(onInferenceOutput);
@@ -194,11 +259,11 @@ export class AIInertialEngine {
   private async runInference(
     onInferenceOutput?: (displacementMeters: number, instantaneousSpeedMps: number, instantaneousHeadingDeltaDeg: number) => void
   ) {
-    if (!this.session || this.isInferring || this.imuBuffer.length < this.seqLen) return;
+    if (!this.sessionSih || this.isInferring || this.imuBuffer.length < this.seqLenSih) return;
     this.isInferring = true;
 
     try {
-      // Physical Zero-Velocity Detection (ZUPT Anti-Drift Gate)
+      // Step 1: Physical Zero-Velocity Detection (ZUPT Gate)
       let sumNorm = 0;
       let sumSqNorm = 0;
       let sumGyro = 0;
@@ -226,6 +291,8 @@ export class AIInertialEngine {
         this.metrics.instantaneousSpeedMps = 0;
         this.metrics.instantaneousSpeedKmh = 0;
         this.metrics.instantaneousTurnDeltaDeg = 0;
+        this.metrics.residualCorrectionMeters = 0;
+        this.metrics.residualSpeedMps = 0;
         this.notify();
 
         if (onInferenceOutput) {
@@ -236,47 +303,83 @@ export class AIInertialEngine {
 
       const t0 = performance.now();
 
-      // Populate pre-allocated flatData buffer
-      for (let i = 0; i < this.seqLen; i++) {
+      // Step 2: Run Base SIH MLP
+      for (let i = 0; i < this.seqLenSih; i++) {
         const s = this.imuBuffer[i];
         const offset = i * this.inFeatures;
-        this.flatData[offset] = s[0];
-        this.flatData[offset + 1] = s[1];
-        this.flatData[offset + 2] = s[2];
-        this.flatData[offset + 3] = s[3];
-        this.flatData[offset + 4] = s[4];
-        this.flatData[offset + 5] = s[5];
+        this.flatDataSih[offset] = s[0];
+        this.flatDataSih[offset + 1] = s[1];
+        this.flatDataSih[offset + 2] = s[2];
+        this.flatDataSih[offset + 3] = s[3];
+        this.flatDataSih[offset + 4] = s[4];
+        this.flatDataSih[offset + 5] = s[5];
       }
 
-      const inputTensor = new ort.Tensor('float32', this.flatData, [1, this.seqLen, this.inFeatures]);
-      const feeds: Record<string, ort.Tensor> = { imu_sequence: inputTensor };
-
-      let results: ort.InferenceSession.ReturnType | null = null;
+      const sihTensor = new ort.Tensor('float32', this.flatDataSih, [1, this.seqLenSih, this.inFeatures]);
+      let sihResults: ort.InferenceSession.ReturnType | null = null;
       try {
-        results = await this.session.run(feeds);
+        sihResults = await this.sessionSih.run({ imu_sequence: sihTensor });
       } finally {
-        // Always dispose input tensor to prevent WebGPU/WASM memory leak
-        inputTensor.dispose();
+        sihTensor.dispose();
+      }
+
+      const sihOutTensor = sihResults.odometry_output || Object.values(sihResults)[0];
+      const sihOutData = sihOutTensor.data as Float32Array;
+
+      let dx = sihOutData[0] || 0;
+      let dy = sihOutData[1] || 0;
+      let instSpeedMps = Math.max(0, sihOutData[2] || 0);
+      const instDeltaThetaDeg = (sihOutData[3] || 0) * (180 / Math.PI);
+      let magnitude = Math.sqrt(dx * dx + dy * dy);
+
+      for (const key in sihResults) {
+        sihResults[key]?.dispose?.();
+      }
+
+      // Step 3: Run SIH-Rect Transformer Residual Correction if mode is active
+      let deltaResidualDisp = 0;
+      let deltaResidualSpeed = 0;
+
+      if (this.activeMode === 'SIH-Rect' && this.sessionTransformer && this.rawImuBuffer60.length >= this.seqLenTrans) {
+        // Normalize 60-sample window
+        const mean = this.scaler.mean;
+        const std = this.scaler.std;
+
+        for (let i = 0; i < this.seqLenTrans; i++) {
+          const s = this.rawImuBuffer60[i];
+          const offset = i * this.inFeatures;
+          for (let c = 0; c < 6; c++) {
+            this.flatDataTrans[offset + c] = (s[c] - (mean[c] || 0)) / (std[c] || 1.0);
+          }
+        }
+
+        const transTensor = new ort.Tensor('float32', this.flatDataTrans, [1, this.seqLenTrans, this.inFeatures]);
+        let transResults: ort.InferenceSession.ReturnType | null = null;
+        try {
+          transResults = await this.sessionTransformer.run({ imu_window_60hz: transTensor });
+        } finally {
+          transTensor.dispose();
+        }
+
+        const transOutTensor = transResults.residual_corrections || Object.values(transResults)[0];
+        const transData = transOutTensor.data as Float32Array;
+        
+        // Predictions over 0.5s interval scaled to 0.2s inference step
+        deltaResidualDisp = (transData[0] || 0) * (0.2 / 0.5);
+        deltaResidualSpeed = (transData[1] || 0);
+
+        for (const key in transResults) {
+          transResults[key]?.dispose?.();
+        }
+
+        // Apply Dynamic Rectification
+        magnitude = Math.max(0.0, magnitude + deltaResidualDisp);
+        instSpeedMps = Math.max(0.0, instSpeedMps + deltaResidualSpeed);
       }
 
       const latency = performance.now() - t0;
-
-      const outputTensor = results.odometry_output || Object.values(results)[0];
-      const outData = outputTensor.data as Float32Array;
-
-      const dx = outData[0] || 0;
-      const dy = outData[1] || 0;
-      const instSpeedMps = Math.max(0, outData[2] || 0);
       const instSpeedKmh = instSpeedMps * 3.6;
-      const instDeltaThetaDeg = (outData[3] || 0) * (180 / Math.PI);
-      const magnitude = Math.sqrt(dx * dx + dy * dy);
 
-      // Dispose output tensors
-      for (const key in results) {
-        results[key]?.dispose?.();
-      }
-
-      // Latency tracking without unbounded array growth
       this.latencies.push(latency);
       if (this.latencies.length > 20) this.latencies.shift();
       const avgLatency = this.latencies.reduce((a, b) => a + b, 0) / this.latencies.length;
@@ -292,6 +395,8 @@ export class AIInertialEngine {
       this.metrics.instantaneousSpeedMps = Number(instSpeedMps.toFixed(2));
       this.metrics.instantaneousSpeedKmh = Number(instSpeedKmh.toFixed(1));
       this.metrics.instantaneousTurnDeltaDeg = Number(instDeltaThetaDeg.toFixed(2));
+      this.metrics.residualCorrectionMeters = Number(deltaResidualDisp.toFixed(3));
+      this.metrics.residualSpeedMps = Number(deltaResidualSpeed.toFixed(2));
 
       this.notify();
 
@@ -308,6 +413,7 @@ export class AIInertialEngine {
   public reset() {
     this.gaussianFilter.reset();
     this.imuBuffer = [];
+    this.rawImuBuffer60 = [];
     this.lastInferenceTime = 0;
     this.isInferring = false;
     this.latencies = [];
@@ -318,6 +424,8 @@ export class AIInertialEngine {
     this.metrics.isStationary = true;
     this.metrics.motionVariance = 0;
     this.metrics.totalInferences = 0;
+    this.metrics.residualCorrectionMeters = 0;
+    this.metrics.residualSpeedMps = 0;
     this.notify();
   }
 }

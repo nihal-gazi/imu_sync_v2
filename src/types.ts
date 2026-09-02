@@ -62,8 +62,13 @@ export interface AIInferenceMetrics {
   isStationary: boolean;
   motionVariance: number;
   modelName: string;
+  activeMode: 'SIH' | 'SIH-Rect';
+  residualCorrectionMeters: number;
+  residualSpeedMps: number;
   errorMessage?: string;
 }
+
+export type ModelMode = 'SIH' | 'SIH-Rect';
 
 export interface SensorStatus {
   gyroAvailable: boolean;

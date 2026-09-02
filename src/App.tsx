@@ -6,12 +6,13 @@ import { ControlBar } from './components/ControlBar';
 import { gridEngine } from './services/gridOdometryEngine';
 import { aiInertialEngine } from './services/aiInertialEngine';
 import type { GridTrackerState } from './services/gridOdometryEngine';
-import type { AIInferenceMetrics, SensorStatus } from './types';
-import { Grid, Activity } from 'lucide-react';
+import type { AIInferenceMetrics, SensorStatus, ModelMode } from './types';
+import { Grid, Activity, Sparkles } from 'lucide-react';
 
 export const App: React.FC = () => {
   const [gridState, setGridState] = useState<GridTrackerState>(() => gridEngine.getState());
   const [aiMetrics, setAiMetrics] = useState<AIInferenceMetrics>(() => aiInertialEngine.getMetrics());
+  const [modelMode, setModelMode] = useState<ModelMode>('SIH'); // Default is SIH
 
   const [sensorStatus, setSensorStatus] = useState<SensorStatus>({
     gyroAvailable: false,
@@ -39,9 +40,13 @@ export const App: React.FC = () => {
       setAiMetrics(metrics);
     });
 
-    // Defer model loading slightly to ensure fluid initial mobile mount
+    // Initialize both SIH Base MLP and SIH-Rect Residual Transformer
     const timer = setTimeout(() => {
-      aiInertialEngine.initializeModel('/models/inertial_mlp.onnx');
+      aiInertialEngine.initializeModel(
+        '/models/inertial_mlp.onnx',
+        '/models/sih_rect_transformer.onnx',
+        '/models/rect_scaler.json'
+      );
     }, 100);
 
     return () => {
@@ -247,16 +252,26 @@ export const App: React.FC = () => {
           <div>
             <div className="text-sm font-bold text-white flex items-center gap-2">
               <span>IMU GRID TRACKER</span>
+              <span className={`text-[10px] px-2 py-0.5 rounded border font-bold flex items-center gap-1 ${
+                modelMode === 'SIH-Rect'
+                  ? 'bg-indigo-500/20 text-indigo-300 border-indigo-500/40'
+                  : 'bg-cyan-500/20 text-cyan-300 border-cyan-500/40'
+              }`}>
+                {modelMode === 'SIH-Rect' && <Sparkles className="w-2.5 h-2.5" />}
+                <span>{modelMode}</span>
+              </span>
               <span className={`text-[10px] px-2 py-0.5 rounded border ${
                 aiMetrics.isLoaded
                   ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30'
                   : 'bg-amber-500/20 text-amber-300 border-amber-500/30'
               }`}>
-                {aiMetrics.isLoaded ? 'ONNX WebGPU Active' : 'Loading Model...'}
+                {aiMetrics.isLoaded ? `ONNX ${aiMetrics.executionProvider.toUpperCase()}` : 'Loading Model...'}
               </span>
             </div>
             <div className="text-[11px] text-slate-400">
-              Pure 2D Cartesian Dead-Reckoning &bull; Gaussian Filter &bull; ZUPT Gate
+              {modelMode === 'SIH-Rect'
+                ? 'SIH Multi-Head MLP + Transformer 1.0s Residual Drift Rectification'
+                : 'Pure 2D Cartesian Dead-Reckoning &bull; Gaussian Filter &bull; ZUPT Gate'}
             </div>
           </div>
         </div>
@@ -301,6 +316,11 @@ export const App: React.FC = () => {
             isSimulating={sensorStatus.isSimulating}
             permissionGranted={sensorStatus.permissionGranted}
             currentHeading={gridState.headingData.heading}
+            activeModelMode={modelMode}
+            onSelectModelMode={(m) => {
+              setModelMode(m);
+              aiInertialEngine.setModelMode(m);
+            }}
             onInjectSample={handleInjectSample}
             onToggleSimulator={toggleSimulator}
             onRequestPermissions={requestSensorPermissions}

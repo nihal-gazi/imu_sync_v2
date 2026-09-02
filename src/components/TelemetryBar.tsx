@@ -74,16 +74,21 @@ export const TelemetryBar: React.FC<TelemetryBarProps> = ({
             {aiMetrics.isStationary ? 'ZUPT LOCK' : 'MOVING'}
           </span>
         </div>
-        <div className="flex items-baseline gap-2 mt-1">
+        <div className="flex items-baseline justify-between mt-1">
           <span className="text-xs text-slate-300 uppercase font-semibold text-amber-400">
-            {aiMetrics.executionProvider}
+            {aiMetrics.activeMode} ({aiMetrics.executionProvider})
           </span>
           <span className="text-[10px] text-slate-400">
             {aiMetrics.lastLatencyMs.toFixed(1)} ms
           </span>
         </div>
-        <div className="text-[10px] text-slate-500 truncate">
-          Inferences: {aiMetrics.totalInferences}
+        <div className="text-[10px] text-slate-500 truncate flex items-center justify-between">
+          <span>Inferences: {aiMetrics.totalInferences}</span>
+          {aiMetrics.activeMode === 'SIH-Rect' && (
+            <span className="text-indigo-400 font-semibold">
+              Drift: {aiMetrics.residualCorrectionMeters >= 0 ? `+${aiMetrics.residualCorrectionMeters.toFixed(2)}` : aiMetrics.residualCorrectionMeters.toFixed(2)}m
+            </span>
+          )}
         </div>
       </div>
     </div>
